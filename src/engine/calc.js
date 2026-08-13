@@ -47,7 +47,11 @@ function baseIvs() {
 // Build a calc Pokemon from a reader mon record. Only known info is passed
 // (revealed, unconsumed item; known ability; current status; current boosts;
 // tera type if already terastallized).
-export function buildPokemon(gen, mon, evs = {}) {
+//
+// `teraType` overrides the tera type when the mon has NOT terastallized yet —
+// this is how the engine simulates "what if we terastallize now" (the calc
+// treats a set teraType as the terastallized state).
+export function buildPokemon(gen, mon, evs = {}, teraType = null) {
   const opts = {
     level: mon?.level ?? 100,
     nature: 'Serious',
@@ -58,7 +62,8 @@ export function buildPokemon(gen, mon, evs = {}) {
   if (mon?.ability) opts.ability = mon.ability;
   if (mon?.status) opts.status = mon.status;
   if (mon?.boosts && Object.values(mon.boosts).some((v) => v !== 0)) opts.boosts = { ...mon.boosts };
-  if (mon?.terastallized && mon?.teraType) opts.teraType = mon.teraType;
+  const tera = mon?.terastallized && mon?.teraType ? mon.teraType : (teraType ?? null);
+  if (tera) opts.teraType = tera;
   return new Pokemon(gen, mon?.species, opts);
 }
 
@@ -82,8 +87,8 @@ export function damagePercent(gen, atkMon, defMon, moveName, field, opts = {}) {
   }
   const atkEvs = move.category === 'Physical' ? { atk: 252 } : { spa: 252 };
   const defEvs = move.category === 'Physical' ? { hp: 252, def: 252 } : { hp: 252, spd: 252 };
-  const attacker = buildPokemon(gen, atkMon, statAssumption === 'base' ? {} : atkEvs);
-  const defender = buildPokemon(gen, defMon, statAssumption === 'base' ? {} : defEvs);
+  const attacker = buildPokemon(gen, atkMon, statAssumption === 'base' ? {} : atkEvs, opts.attackerTera ?? null);
+  const defender = buildPokemon(gen, defMon, statAssumption === 'base' ? {} : defEvs, opts.defenderTera ?? null);
   let result;
   try {
     result = calculate(gen, attacker, defender, move, field);
@@ -102,11 +107,18 @@ export function damagePercent(gen, atkMon, defMon, moveName, field, opts = {}) {
   } catch {
     // desc() throws for immune (0-damage) results — rawDesc is fine.
   }
+  // Tera-aware effectiveness: a terastallized (or simulated) defender's typing
+  // collapses to its tera type. The calc applies this internally, but the
+  // Pokemon's `.types` still reports the species types, so we mirror it here.
+  const defTera =
+    defMon?.terastallized && defMon?.teraType ? defMon.teraType : (opts.defenderTera ?? null);
   return {
     move: moveName,
     category: move.category,
     type: move.type,
-    effectiveness: effectivenessOf(gen, move.type, defender.types),
+    effectiveness: defTera
+      ? effectivenessOf(gen, move.type, [defTera])
+      : effectivenessOf(gen, move.type, defender.types),
     min: pct.length ? round1(Math.min(...pct)) : 0,
     max: pct.length ? round1(Math.max(...pct)) : 0,
     mean: pct.length ? round1(pct.reduce((a, b) => a + b, 0) / pct.length) : 0,

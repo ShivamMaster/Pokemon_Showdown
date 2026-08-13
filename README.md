@@ -12,6 +12,38 @@ best move, built in stages:
    the reader and shows the panel.
 5. **Profiles** (done) — per-opponent learning: battle histories, switching
    tendencies, common leads, and move usage, fed back into the engine.
+6. **Screen reading, tera & movepools** (done) — the extension watches the
+   hover tooltips you inspect on screen; the engine is tera-aware and reasons
+   over every move the opponent's Pokémon could still have.
+
+## Stage 6: screen reading, tera & movepools
+
+Three additions that give the engine more of what you know at the table:
+
+- **Screen reading** (`src/content/tooltips.js`) — when you hover a Pokémon
+  (your own sets at team preview, or either side mid-battle), the Showdown
+  client renders a tooltip on screen; the extension observes it and merges
+  what it says into the battle state: extra moves, **PP counts** (the log
+  never shows PP), items, abilities, and tera types. The panel shows PP next
+  to moves (`Dragon Pulse (15/16)`). Verified against the real client's
+  tooltip markup and end-to-end in the E2E (hover a team icon → the panel
+  picks up the PP).
+- **Tera** — the reader ingests tera data from the live `|request|`
+  (`teraType`/`terastallized` per Pokémon, `canTerastallize` for the active),
+  the damage calc passes tera through (and a previously-buggy effectiveness
+  display for terastallized defenders is fixed), and the engine notes when
+  their active has terastallized, suggests terastallizing **your** active
+  when it meaningfully improves your best move or cuts incoming damage, and
+  accounts for tera in hidden-move threats.
+- **Movepools** (`src/engine/movepool.js`) — the engine considers *every* Gen
+  9-legal move the opponent's Pokémon could know, not just what's revealed.
+  `scripts/build-learnsets.js` extracts a compact per-species move list from
+  the official Showdown learnsets data into `src/engine/data/learnsets-lite.js`
+  (regenerate with `npm run learnsets`; the output is committed so builds and
+  tests work offline). The recommendation then warns about specific hidden
+  threats (`⚠ their Dragonite could have Hurricane — it hits your Rillaboom
+  for ~79.8%`), and switching is penalized when a hidden move would maul the
+  candidate you're switching into.
 
 ## Stage 5: per-opponent profiles, settings & options
 
@@ -94,12 +126,16 @@ The E2E uses Chrome for Testing because managed/system Chrome blocks
 npx @puppeteer/browsers install chrome@stable --path /tmp/cft-chrome
 ```
 
-Tests (81): the reader (real battle + edge cases), the UI renderer, the
-engine, the profiles (summary extraction, forced-switch exclusion, low-HP
-accounting, aggregation, engine/display projections), the storage driver
-(memory + bridge modes), the settings module, the options-page rendering,
-and the live client protocol (`test/fixtures/live-stepqueue.json` was
-captured from a real battle page and parses identically).
+Tests (101): the reader (real battle + edge cases, the live `|request|`
+fixture with moves/PP/tera/canTera, and hover observations), the UI
+renderer, the engine (type advantage, KO detection, switch advice, utility
+moves, calc consistency, switch prediction, tera effectiveness + tera
+suggestions, hidden-move warnings, the real fixture), the movepool
+(learnsets, worst-case hidden threats, terastallized attackers), the tooltip
+parser (real captured tooltip text, mon resolution), the profiles, the
+storage driver, the settings module, and the options-page rendering. The
+live client protocol fixture (`test/fixtures/live-stepqueue.json`) was
+captured from a real battle page and parses identically.
 
 ## Stage 3: engine
 
@@ -112,7 +148,15 @@ captured from a real battle page and parses identically).
   the stats relevant to each calculation (attacker's attacking stat, defender's
   HP + defending stat) — you can switch to raw base stats with
   `opts.statAssumption: 'base'`. Type effectiveness comes from the calc
-  package's per-generation type chart.
+  package's per-generation type chart. Tera is simulated with
+  `opts.attackerTera` / `opts.defenderTera` (the calc treats a set tera type
+  as the terastallized state), and effectiveness is reported for the tera
+  type when a defender is terastallized.
+- `movepool.js` — hidden-move reasoning: `potentialMoves(species)` from the
+  bundled Gen 9 learnsets, `worstThreat(theirMon, target)` (the strongest
+  move they haven't revealed yet, pre-scored by power × effectiveness × STAB
+  then damage-calc'd on the top candidates, memoized per state signature),
+  and `teamThreats(...)` across your whole team.
 - `recommend.js` — the decision logic:
   - Each move is scored as expected damage vs their active Pokémon weighted by
     P(they stay), plus damage vs each benched mon weighted by P(switch-in),
@@ -193,24 +237,30 @@ reader.applyLine(line); // one protocol line at a time
 npm test
 ```
 
-81 tests cover the reader (real 22-turn Gen 9 OU battle + edge cases), the
-UI (model, HTML output, escaping, mid-battle and empty states), the engine
-(type advantage, KO detection, switch advice, utility moves, calc
-consistency, switch prediction, the real fixture), the profiles, the storage
-driver, the settings module, and the options-page rendering. The demo page is
-also verified end-to-end by rendering it in headless Chrome, and the
-extension itself is verified end-to-end: a real battle page is loaded with
-the actual built extension, and the E2E checks the live panel, profile
-recording, persistence across a page reload, the options page, the popup,
-and the live panel toggle.
+101 tests cover the reader (real 22-turn Gen 9 OU battle + edge cases),
+the UI (model, HTML output, escaping, mid-battle and empty states), the
+engine (type advantage, KO detection, switch advice, utility moves, calc
+consistency, switch prediction, tera, movepool threats, the real fixture),
+the tooltip parser, the movepool, the profiles, the storage driver, the
+settings module, and the options-page rendering. The demo page is also
+verified end-to-end by rendering it in headless Chrome, and the extension
+itself is verified end-to-end: a real battle page is loaded with the actual
+built extension, and the E2E checks the live panel, profile recording, a
+hover-tooltip observation (PP appears in the panel), persistence across a
+page reload, the options page, the popup, and the live panel toggle.
 
 Tests cover a real 22-turn Gen 9 OU battle (`test/fixtures/real-battle.log`,
 fetched from Showdown replays) plus hand-crafted edge cases.
 
 ### Known limitations
 
-- Info the log never reveals stays unknown by design (e.g. an opponent's
-  unused 4th move, or an item that never surfaces) — `item` stays `null`.
+- Info never revealed — by the log **or** a hover tooltip — stays unknown by
+  design. The movepool covers "what could they have" (full Gen 9 learnset)
+  but not "what do they have": hidden-move threats are worst-case warnings,
+  and the switch penalty is a heuristic, not certainty.
+- `canTera` is only known for **your** side (it comes from the live
+  `|request|`); the opponent's ability to terastallize is unknown until they
+  actually do (or never).
 - Ability reveal via `-end|ident|Ability` only covers the paradox abilities
   that use that pattern.
 - Roster→field linking is by species; duplicate-species teams would need

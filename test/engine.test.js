@@ -53,6 +53,9 @@ function makeState({ ourActive, theirActive, ourBench = [], theirBench = [], gen
       if (spec.boosts) Object.assign(rec.boosts, spec.boosts);
       for (const mv of spec.moves ?? []) addMove(rec, mv);
       if (spec.fainted) rec.fainted = true;
+      if (spec.teraType) rec.teraType = spec.teraType;
+      if (spec.terastallized) rec.terastallized = true;
+      if (spec.canTera != null) rec.canTera = spec.canTera;
       return rec;
     });
     const active = side.pokemon.find((p) => p.species === activeSpecies);
@@ -259,5 +262,77 @@ test('fixture: full recommendation at the last decision point (turn 22)', () => 
   const rec = recommend(state);
   assert.equal(rec.bestMove.move, 'Knock Off'); // best neutral hit vs Dragonite
   assert.ok(rec.reasoning.length > 0);
-  assert.ok(rec.reasoning.some((r) => r.includes('unknown move')), 'should flag Dragonite\'s hidden moves');
+  assert.ok(
+    rec.reasoning.some((r) => /unknown move|not yet revealed|hidden/.test(r)),
+    'should flag Dragonite\'s hidden moves'
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Tera
+// ---------------------------------------------------------------------------
+
+test('damagePercent is tera-aware for a terastallized defender', () => {
+  const garchomp = createPokemon({ ident: 'p1a: Garchomp', side: 'p1', species: 'Garchomp' });
+  addMove(garchomp, 'Earthquake');
+  const dragonite = createPokemon({ ident: 'p2a: Dragonite', side: 'p2', species: 'Dragonite' });
+  dragonite.terastallized = true;
+  dragonite.teraType = 'Grass';
+  const d = damagePercent(9, garchomp, dragonite, 'Earthquake', new Field());
+  assert.equal(d.effectiveness, 0.5); // Earthquake vs a tera-Grass defender
+  assert.ok(d.mean < 50, `expected a resisted hit, got ${d.mean}%`);
+});
+
+test('attackerTera simulation boosts STAB in damagePercent', () => {
+  const garchomp = createPokemon({ ident: 'p1a: Garchomp', side: 'p1', species: 'Garchomp' });
+  addMove(garchomp, 'Fire Blast');
+  const scizor = createPokemon({ ident: 'p2a: Scizor', side: 'p2', species: 'Scizor' });
+  const plain = damagePercent(9, garchomp, scizor, 'Fire Blast', new Field());
+  const tera = damagePercent(9, garchomp, scizor, 'Fire Blast', new Field(), { attackerTera: 'Fire' });
+  assert.equal(plain.effectiveness, 4); // Fire vs Bug/Steel
+  assert.ok(tera.mean > plain.mean, `tera STAB should boost damage (${tera.mean} vs ${plain.mean})`);
+});
+
+test('recommend suggests terastallizing when it meaningfully improves our options', () => {
+  const state = makeState({
+    ourActive: { species: 'Garchomp', moves: ['Fire Blast', 'Earthquake'], teraType: 'Fire', canTera: true },
+    theirActive: { species: 'Scizor', moves: ['Bullet Punch', 'U-turn', 'Swords Dance', 'Roost'] },
+  });
+  const rec = recommend(state);
+  assert.ok(
+    rec.reasoning.some((r) => r.includes('terastalliz')),
+    `expected a tera suggestion, got: ${JSON.stringify(rec.reasoning)}`
+  );
+});
+
+test('recommend does not suggest tera when canTera is unknown (replay/log state)', () => {
+  const state = makeState({
+    ourActive: { species: 'Garchomp', moves: ['Fire Blast'], teraType: 'Fire' }, // canTera unknown
+    theirActive: { species: 'Scizor', moves: ['Bullet Punch'] },
+  });
+  const rec = recommend(state);
+  assert.ok(!rec.reasoning.some((r) => r.includes('terastalliz')));
+});
+
+test('recommend notes when the opponent has terastallized', () => {
+  const state = makeState({
+    ourActive: { species: 'Togekiss', moves: ['Air Slash', 'Roost'] },
+    theirActive: { species: 'Dragonite', moves: ['Outrage', 'Earthquake'], teraType: 'Grass', terastallized: true },
+  });
+  const rec = recommend(state);
+  assert.ok(
+    rec.reasoning.some((r) => r.includes('terastallized') && r.includes('Grass')),
+    `expected a tera note, got: ${JSON.stringify(rec.reasoning)}`
+  );
+});
+
+test('recommend warns about a specific hidden-move threat', () => {
+  const state = makeState({
+    ourActive: { species: 'Flutter Mane', moves: ['Moonblast', 'Shadow Ball', 'Calm Mind'] },
+    theirActive: { species: 'Glimmora', moves: ['Mortal Spin'] }, // only 1/4 revealed
+  });
+  const rec = recommend(state);
+  const threat = rec.reasoning.find((r) => r.includes('not yet revealed'));
+  assert.ok(threat, `expected a hidden-threat warning, got: ${JSON.stringify(rec.reasoning)}`);
+  assert.ok(!threat.includes('Mortal Spin'), 'revealed moves must not appear as hidden threats');
 });

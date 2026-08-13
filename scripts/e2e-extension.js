@@ -112,6 +112,29 @@ try {
     });
   });
 
+  // 1b. Hovering a Pokémon on screen shows its tooltip, which the assistant
+  // reads: the hovered mon (Raging Bolt) gains PP on its revealed moves.
+  await step('hoverTooltip', async () => {
+    const sel = '.battle .teamicons .picon.has-tooltip';
+    await page.waitForSelector(sel, { timeout: 15000 });
+    await page.hover(sel);
+    await page.waitForFunction(
+      () => {
+        const overlay = document.getElementById('psa-overlay');
+        const text = overlay?.innerText ?? '';
+        return Number(overlay?.dataset.psaObserved ?? 0) >= 1 && text.includes('Dragon Pulse (15/16)');
+      },
+      { timeout: 15000 }
+    );
+    results.hoverTooltip = await page.evaluate(() => {
+      const overlay = document.getElementById('psa-overlay');
+      return {
+        observed: overlay?.dataset.psaObserved,
+        hasPp: (overlay?.innerText ?? '').includes('Dragon Pulse (15/16)'),
+      };
+    });
+  });
+
   // 2. Battle ends -> opponent profile recorded and persisted via the bridge.
   await step('profileRecorded', async () => {
     await page.waitForFunction(stripReady, { timeout: 30000 }, 1);

@@ -26,6 +26,7 @@ import {
 import { loadSettings, normalizeSettings, onStorageChanged } from '../settings.js';
 import { createBattleSource } from './source.js';
 import { ensureOverlay, ensureReopenButton, mountPanel, hidePanel, showPanel } from './overlay.js';
+import { createTooltipObserver, resolveMon } from './tooltips.js';
 
 const source = createBattleSource();
 const reader = new BattleReader();
@@ -37,6 +38,7 @@ let lastRenderAt = 0;
 let mounted = false;
 let linesSeen = 0;
 let battleEnded = false;
+let observedCount = 0;
 
 const profiles = {}; // keyed by lowercased opponent name
 let currentOpponentKey = null;
@@ -161,3 +163,24 @@ function tick() {
 ensureReopenButton();
 setInterval(tick, POLL_MS);
 tick();
+
+// Watch the user's hover tooltips: whatever the player inspects on screen
+// (their own sets at team preview, or either side's revealed info mid-battle)
+// gets merged into the battle state and the panel. Failures here are
+// non-fatal — the log-based pipeline keeps working regardless.
+createTooltipObserver({
+  onObservation: (obs) => {
+    try {
+      const mon = resolveMon(reader.state, obs);
+      if (!mon) return;
+      const changes = reader.applyObservation(mon, obs);
+      if (changes) {
+        observedCount += 1;
+        overlay.dataset.psaObserved = String(observedCount);
+        render(true);
+      }
+    } catch (err) {
+      overlay.dataset.psaError = String(err?.stack ?? err);
+    }
+  },
+});

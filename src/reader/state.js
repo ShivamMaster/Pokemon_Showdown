@@ -51,8 +51,11 @@ export function createPokemon({ ident, side, species, gender, level }) {
     itemRevealed: false,
     itemConsumed: false,
     ability: null,
-    teraType: null,
+    teraType: null,            // revealed tera type (from details, |terastallize|, request, or hover tooltips)
     terastallized: false,
+    canTera: null,             // null = unknown, true/false (ours, from the live |request|)
+    movePp: {},                // moveName -> { cur, max } PP, from hover tooltips / request
+    observed: false,           // any info came from hovering the Pokémon on screen
     hp: null,                 // { cur, max } in log units (often percentages) or null if unknown
     hpPercent: null,          // normalized 0-100
     status: null,             // one of STATUS_CODES or null

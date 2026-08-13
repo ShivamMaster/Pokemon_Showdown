@@ -339,3 +339,102 @@ test('BattleReader can process events incrementally (live mode)', () => {
   assert.equal(pikachu.hpPercent, 50);
   assert.equal(s.turn, 1);
 });
+
+// ---------------------------------------------------------------------------
+// Live |request| (our full team) and hover observations
+// ---------------------------------------------------------------------------
+
+const REQUEST = JSON.stringify({
+  active: [
+    {
+      moves: [{ move: 'Dragon Pulse', id: 'dragonpulse', pp: 15, maxpp: 24, target: 'normal', disabled: false }],
+      canTerastallize: 'Fire',
+      teraType: 'Fire',
+      activeTera: false,
+    },
+  ],
+  side: {
+    name: 'BaddyGames',
+    id: 'p1',
+    pokemon: [
+      {
+        ident: 'p1a: Dragonite',
+        details: 'Dragonite, M',
+        condition: '281/281',
+        active: true,
+        moves: ['dragonpulse', 'fireblast'],
+        baseAbility: 'Multiscale',
+        item: 'leftovers',
+        teraType: 'Fire',
+      },
+      {
+        ident: 'p1b: Rillaboom',
+        details: 'Rillaboom, F',
+        condition: '281/281',
+        active: false,
+        moves: ['woodhammer', 'knockoff', 'uturn', 'highhorsepower'],
+        baseAbility: 'Grassy Surge',
+        item: 'assaultvest',
+        teraType: 'Grass',
+      },
+    ],
+  },
+  rqid: 1,
+  requestType: 'move',
+  teamPreview: false,
+});
+
+test('request ingests our team: moves (ids → display), PP, items, tera, canTera', () => {
+  const reader = new BattleReader();
+  reader.applyLine(`|gen|9`);
+  reader.applyLine(`|request|${REQUEST}`);
+  const s = reader.state;
+  const dn = s.sides.p1.pokemon.find((m) => m.species === 'Dragonite');
+  assert.ok(dn, 'Dragonite should exist from the request');
+  assert.deepEqual(dn.moves, ['Dragon Pulse', 'Fire Blast']);
+  assert.deepEqual(dn.movePp['Dragon Pulse'], { cur: 15, max: 24 });
+  assert.equal(dn.item, 'leftovers');
+  assert.equal(dn.itemRevealed, true);
+  assert.equal(dn.teraType, 'Fire');
+  assert.equal(dn.canTera, true); // from active.canTerastallize
+  assert.equal(dn.hpPercent, 100);
+  const rb = s.sides.p1.pokemon.find((m) => m.species === 'Rillaboom');
+  assert.equal(rb.teraType, 'Grass');
+  assert.equal(rb.canTera, null); // bench canTera stays unknown
+  assert.deepEqual(rb.moves, ['Wood Hammer', 'Knock Off', 'U-turn', 'High Horsepower']);
+});
+
+test('applyObservation merges hover tooltip info into a Pokémon', () => {
+  const reader = new BattleReader();
+  reader.read(realLog);
+  const dn = reader.state.sides.p2.pokemon.find((m) => m.species === 'Dragonite');
+  assert.ok(dn);
+  const changes = reader.applyObservation(dn, {
+    species: 'Dragonite',
+    ability: 'Multiscale',
+    item: 'Leftovers',
+    teraType: 'Normal',
+    moves: [
+      { name: 'Outrage', pp: 10, maxpp: 10 },
+      { name: 'Extreme Speed', pp: 5, maxpp: 5 },
+    ],
+  });
+  assert.ok(changes, 'expected changes from the observation');
+  assert.equal(dn.ability, 'Multiscale');
+  // The log already revealed Loaded Dice — an observation must not override it.
+  assert.equal(dn.item, 'Loaded Dice');
+  assert.equal(dn.itemRevealed, true);
+  assert.equal(dn.teraType, 'Normal');
+  assert.ok(dn.moves.includes('Extreme Speed'));
+  assert.deepEqual(dn.movePp['Extreme Speed'], { cur: 5, max: 5 });
+  assert.ok(reader.state.actions.some((a) => a.type === 'observed'));
+  assert.equal(dn.observed, true);
+});
+
+test('applyObservation returns null when nothing new is learned', () => {
+  const reader = new BattleReader();
+  reader.read(realLog);
+  const dn = reader.state.sides.p2.pokemon.find((m) => m.species === 'Dragonite');
+  const changes = reader.applyObservation(dn, { species: 'Dragonite', moves: [] });
+  assert.equal(changes, null);
+});

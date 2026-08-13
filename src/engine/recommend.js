@@ -19,6 +19,7 @@
 // (species -> weight). Without a profile, sensible defaults apply.
 
 import { damagePercent, buildField, round1 } from './calc.js';
+import { worstThreat, teamThreats } from './movepool.js';
 
 const clamp01 = (n) => Math.max(0, Math.min(1, n));
 
@@ -199,13 +200,21 @@ export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, ca
   const now = incomingPercent(theirActive, ourActive, gen, field, calcOpts);
   const cand = incomingPercent(theirActive, candidate, gen, field, calcOpts);
   const candOff = ownBestDamage(candidate, theirActive, gen, field, calcOpts);
-  const net = (now.pct - cand.pct) + candOff * 0.15;
+  let net = (now.pct - cand.pct) + candOff * 0.15;
   if (net <= 0) return null;
   const theirMove = now.move ?? cand.move ?? 'their moves';
-  const note =
+  let note =
     `Switch to ${candidate.species}: takes ~${round1(cand.pct)}% from ${theirMove} ` +
     `(vs ~${round1(now.pct)}% for ${ourActive.species})` +
     (candOff ? `, hits back for ~${round1(candOff)}%` : '');
+  // The switch assessment only sees their revealed moves. If their species
+  // could know a hidden move that mauls this candidate, penalize the switch
+  // and say so — the decision should account for what they might have.
+  const threat = worstThreat(theirActive, candidate, gen, field, calcOpts);
+  if (threat && threat.pct >= 60) {
+    net -= threat.pct >= 80 ? 10 : 5;
+    note += `; but their ${theirActive?.species} could have ${threat.move} (~${round1(threat.pct)}%) — hidden`;
+  }
   return {
     ident: candidate.ident,
     species: candidate.species,
@@ -340,9 +349,46 @@ export function recommend(state, opts = {}) {
 
   if (switchTo) reasoning.push(switchTo.note);
 
-  const unknown = theirTarget.moves?.length ?? 0;
+  // Tera awareness.
+  if (theirTarget?.terastallized) {
+    reasoning.push(`Their ${theirTarget.species} is terastallized (tera ${theirTarget.teraType}) — effectiveness above accounts for it.`);
+  }
+  if (ourActive.canTera && ourActive.teraType && !ourActive.terastallized) {
+    const tera = ourActive.teraType;
+    const gains = [];
+    if (bestMove && bestMove.kind === 'damage') {
+      const dNow = bestMove.expected.mean;
+      const dTera = damagePercent(gen, ourActive, theirTarget, bestMove.move, field, {
+        ...calcOpts,
+        attackerTera: tera,
+      })?.mean;
+      if (dTera != null && dTera > dNow + 8) {
+        gains.push(`tera-${tera} boosts ${bestMove.move} ~${round1(dNow)}% → ~${round1(dTera)}%`);
+      }
+    }
+    const inNow = incomingPercent(theirTarget, ourActive, gen, field, calcOpts).pct;
+    const inTera = incomingPercent(theirTarget, ourActive, gen, field, { ...calcOpts, defenderTera: tera }).pct;
+    if (inTera < inNow - 20) {
+      gains.push(`tera-${tera} cuts incoming damage ~${round1(inNow)}% → ~${round1(inTera)}%`);
+    }
+    if (gains.length) {
+      reasoning.push(`Consider terastallizing your ${ourActive.species} into ${tera}: ${gains.join('; ')}.`);
+    }
+  }
+
+  // Hidden moves: the opponent's active may know something we haven't seen.
+  const unknown = theirTarget?.moves?.length ?? 0;
   if (unknown < 4) {
-    reasoning.push(`Their ${theirTarget.species} has ${unknown}/4 moves revealed — expect an unknown move.`);
+    const threat = worstThreat(theirTarget, ourActive, gen, field, calcOpts);
+    if (threat && threat.pct >= 25) {
+      reasoning.push(`⚠ their ${theirTarget.species} could have ${threat.move} — it hits your ${ourActive.species} for ~${round1(threat.pct)}% (not yet revealed).`);
+    } else {
+      reasoning.push(`Their ${theirTarget.species} has ${unknown}/4 moves revealed — expect an unknown move.`);
+    }
+    const benchThreat = teamThreats(theirTarget, bench, gen, field, calcOpts, { top: 1, minPct: 30 });
+    if (benchThreat.length && benchThreat[0].target !== ourActive.species) {
+      reasoning.push(`Watch out: their ${theirTarget.species} could have ${benchThreat[0].move} — it hits your ${benchThreat[0].target} for ~${round1(benchThreat[0].pct)}%.`);
+    }
   }
   if (ourActive.moves.length < 4) {
     reasoning.push(`Your ${ourActive.species} has ${ourActive.moves.length} moves known from this log.`);

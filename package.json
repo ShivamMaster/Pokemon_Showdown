@@ -10,7 +10,8 @@
   "scripts": {
     "test": "node --test",
     "advise": "node scripts/advise.js",
-    "build": "node scripts/make-icons.js && esbuild src/background/background.js --bundle --format=iife --outfile=extension/dist/background.js && esbuild src/content/content.js --bundle --format=iife --outfile=extension/dist/content.js && esbuild src/bridge/bridge.js --bundle --format=iife --outfile=extension/dist/bridge.js && esbuild src/options/options.js --bundle --format=esm --outfile=extension/dist/options.js && esbuild src/popup/popup.js --bundle --format=esm --outfile=extension/dist/popup.js && esbuild src/ui/styles.css --outfile=extension/dist/content.css && esbuild src/options/options.css --outfile=extension/dist/options.css && esbuild demo/demo.js --bundle --format=esm --outfile=demo/demo.bundle.js",
+    "learnsets": "node scripts/build-learnsets.js",
+    "build": "node scripts/build-learnsets.js && node scripts/make-icons.js && esbuild src/background/background.js --bundle --format=iife --outfile=extension/dist/background.js && esbuild src/content/content.js --bundle --format=iife --outfile=extension/dist/content.js && esbuild src/bridge/bridge.js --bundle --format=iife --outfile=extension/dist/bridge.js && esbuild src/options/options.js --bundle --format=esm --outfile=extension/dist/options.js && esbuild src/popup/popup.js --bundle --format=esm --outfile=extension/dist/popup.js && esbuild src/ui/styles.css --outfile=extension/dist/content.css && esbuild src/options/options.css --outfile=extension/dist/options.css && esbuild demo/demo.js --bundle --format=esm --outfile=demo/demo.bundle.js",
     "e2e": "node scripts/e2e-extension.js"
   },
   "dependencies": {

@@ -16,6 +16,7 @@ import {
   updateHp,
 } from './state.js';
 import { parseLine } from './parser.js';
+import { displayMoveName } from './movenames.js';
 
 // Moves that force the user to switch after use (Volt Switch etc.). A switch
 // immediately after one of these is treated as forced, not a free choice.
@@ -443,7 +444,8 @@ export class BattleReader {
   }
 
   _applyRequest(jsonStr) {
-    // Live-only: `|request|` carries our own full team (moves, items, HP).
+    // Live-only: `|request|` carries our own full team — moves (with PP),
+    // items, HP, tera types — and which actives can still terastallize.
     let req;
     try {
       req = JSON.parse(jsonStr);
@@ -460,7 +462,16 @@ export class BattleReader {
         mon = createPokemon({ ident: p.ident, side: side.id, species: d.species, gender: d.gender, level: d.level });
         side.pokemon.push(mon);
       }
-      if (Array.isArray(p.moves)) for (const m of p.moves) if (m?.move) addMove(mon, m.move);
+      if (Array.isArray(p.moves)) {
+        for (const m of p.moves) {
+          if (typeof m === 'string') addMove(mon, displayMoveName(this.state.gen ?? 9, m));
+          else if (m?.move) {
+            const name = displayMoveName(this.state.gen ?? 9, m.move);
+            addMove(mon, name);
+            if (m.pp != null) mon.movePp[name] = { cur: m.pp, max: m.maxpp ?? m.pp };
+          }
+        }
+      }
       if (p.item) {
         mon.item = p.item;
         mon.itemRevealed = true;
@@ -469,7 +480,91 @@ export class BattleReader {
         const hp = parseHp(p.condition);
         if (hp && hp.cur != null) updateHp(mon, hp);
       }
+      if (p.active) {
+        mon.active = true;
+        if (!side.active.includes(mon.ident)) side.active.push(mon.ident);
+      }
+      // Gen 9 request data: teraType (always present), terastallized (current
+      // tera type), and canTera/canTerastallize on the active entries below.
+      if (p.teraType) mon.teraType = p.teraType;
+      if (p.terastallized) {
+        mon.teraType = p.terastallized;
+        mon.terastallized = true;
+      }
+      if (p.canTera != null) mon.canTera = !!p.canTera;
     }
+    // Active slots: whether our active Pokémon can still terastallize.
+    const actives = req.active ?? [];
+    const activeIdents = side.active.length
+      ? side.active
+      : side.pokemon.filter((m) => m.active).map((m) => m.ident);
+    actives.forEach((a, i) => {
+      const mon = activeIdents[i] ? getPokemon(this.state, activeIdents[i]) : null;
+      if (!mon) return;
+      if (a.canTerastallize != null) mon.canTera = !!a.canTerastallize;
+      else if (a.canTera != null) mon.canTera = !!a.canTera;
+      if (a.teraType) mon.teraType = a.teraType;
+      if (a.activeTera) mon.terastallized = true;
+      // Active moves carry PP — ingest them for the panel and PP tracking.
+      for (const m of a.moves ?? []) {
+        if (!m?.move) continue;
+        const name = displayMoveName(this.state.gen ?? 9, m.move);
+        addMove(mon, name);
+        if (m.pp != null) mon.movePp[name] = { cur: m.pp, max: m.maxpp ?? m.pp };
+      }
+    });
+  }
+
+  // Merge info read from the on-screen hover tooltip into a Pokémon's record.
+  // Returns the changes applied, or null when nothing new was learned.
+  applyObservation(identOrMon, obs = {}) {
+    const mon = typeof identOrMon === 'string' ? getPokemon(this.state, identOrMon) : identOrMon;
+    if (!mon) return null;
+    const changes = { moves: [], pp: [], item: false, ability: false, tera: false };
+    for (const m of obs.moves ?? []) {
+      if (!m?.name) continue;
+      if (!mon.moves.includes(m.name)) {
+        mon.moves.push(m.name);
+        changes.moves.push(m.name);
+      }
+      if (m.pp != null) {
+        const max = m.maxpp ?? m.pp;
+        if (mon.movePp[m.name]?.cur !== m.pp) changes.pp.push(m.name);
+        mon.movePp[m.name] = { cur: m.pp, max };
+      }
+    }
+    if (obs.item && obs.item !== 'None' && !mon.itemRevealed) {
+      mon.item = obs.item;
+      mon.itemRevealed = true;
+      changes.item = true;
+    }
+    if (obs.itemConsumed) mon.itemConsumed = true;
+    if (obs.ability && !mon.ability) {
+      mon.ability = obs.ability;
+      changes.ability = true;
+    }
+    if (obs.teraType && !mon.teraType) {
+      mon.teraType = obs.teraType;
+      changes.tera = true;
+    }
+    if (obs.hpText) {
+      const m = /^(\d+(?:\.\d+)?)%$/.exec(String(obs.hpText).trim());
+      if (m && mon.hpPercent == null) {
+        mon.hpPercent = parseFloat(m[1]);
+        mon.hp = { cur: mon.hpPercent, max: 100 };
+      } else if (String(obs.hpText).trim().toLowerCase().includes('fainted')) {
+        mon.fainted = true;
+      }
+    }
+    const changed =
+      changes.moves.length > 0 || changes.pp.length > 0 ||
+      changes.item || changes.ability || changes.tera;
+    if (changed) {
+      mon.observed = true;
+      this._recordAction('observed', mon.side, mon.ident, { species: mon.species, ...changes });
+      return changes;
+    }
+    return null;
   }
 
   // `[from] item: X` / `[from] ability: X` appear as extra args on damage,

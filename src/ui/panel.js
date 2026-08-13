@@ -56,7 +56,10 @@ export function buildPanelModel(state, opts = {}) {
           itemConsumed: !!mon.itemConsumed,
           ability: mon.ability ?? null,
           tera: mon.teraType ?? null,
+          teraActive: !!mon.terastallized,
+          canTera: mon.canTera ?? null,
           moves: [...(mon.moves ?? [])],
+          movePp: { ...(mon.movePp ?? {}) },
           hiddenCount: Math.max(0, 4 - (mon.moves?.length ?? 0)),
           boosts,
           switchCount: mon.switchCount ?? 0,
@@ -140,9 +143,21 @@ function renderCard(card) {
     .map(([s, v]) => `${v > 0 ? '+' : ''}${v} ${s}`)
     .join(' · ');
   const itemText = card.itemKnown ? card.item + (card.itemConsumed ? ' (gone)' : '') : '?';
-  const details = `item: ${itemText} · ability: ${card.ability ?? '?'}${card.tera ? ` · tera: ${card.tera}` : ''}`;
-  const movesHtml = card.moves.length
-    ? escapeHtml(card.moves.join(' · ')) +
+  let teraText = '';
+  if (card.tera) {
+    teraText = ` · tera: ${card.tera}${card.teraActive ? ' ✦ active' : card.canTera ? ' (can tera)' : ''}`;
+  } else if (card.canTera) {
+    teraText = ' · can tera';
+  }
+  const details = `item: ${itemText} · ability: ${card.ability ?? '?'}${teraText}`;
+  const moveText = card.moves
+    .map((m) => {
+      const pp = card.movePp?.[m];
+      return pp?.cur != null ? `${m} (${pp.cur}/${pp.max})` : m;
+    })
+    .join(' · ');
+  const movesHtml = moveText
+    ? escapeHtml(moveText) +
       (card.hiddenCount > 0 ? ` <span class="psa-hidden">(+${card.hiddenCount} hidden)</span>` : '')
     : '<span class="psa-muted">no moves revealed</span>';
 
