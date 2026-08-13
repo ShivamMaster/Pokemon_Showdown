@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createPokemon, addMove } from '../src/reader/state.js';
-import { potentialMoves, worstThreat, teamThreats } from '../src/engine/movepool.js';
+import { potentialMoves, worstThreat, teamThreats, topPotentialMoves, usageWeight } from '../src/engine/movepool.js';
 
 function makeMon(species, { moves = [], teraType = null, terastallized = false } = {}) {
   const rec = createPokemon({ ident: `p1a: ${species}`, side: 'p1', species });
@@ -21,6 +21,42 @@ test('potentialMoves returns the Gen 9-legal learnset for a species', () => {
   }
   assert.deepEqual(potentialMoves('Dragonite'), moves); // memoized
   assert.deepEqual(potentialMoves('Totally-Not-A-Species'), []);
+});
+
+test('usageWeight returns Smogon usage % for common moves, null otherwise', () => {
+  // Great Tusk runs Rapid Spin on ~92% of sets per the bundled stats.
+  assert.equal(usageWeight('Great Tusk', 'Rapid Spin'), 92.0);
+  assert.ok(usageWeight('Great Tusk', 'Headlong Rush') > 80);
+  // A legal-but-uncommon move has no usage entry.
+  assert.equal(usageWeight('Great Tusk', 'Tackle'), null);
+  assert.equal(usageWeight('Totally-Not-A-Species', 'Tackle'), null);
+});
+
+test('topPotentialMoves ranks by usage stats, not raw base power', () => {
+  // Great Tusk's most-used damaging moves are Rapid Spin (92%), Headlong
+  // Rush (81.7%), Ice Spinner (77.6%) — while raw base power would put
+  // Earthquake / Close Combat / Headlong Rush first.
+  const top = topPotentialMoves('Great Tusk', 3);
+  assert.equal(top[0], 'Rapid Spin');
+  assert.equal(top[1], 'Headlong Rush');
+  assert.equal(top[2], 'Ice Spinner');
+});
+
+test('topPotentialMoves falls back to base power for species without usage data', () => {
+  const top = topPotentialMoves('Totally-Not-A-Species', 2);
+  assert.deepEqual(top, []);
+  // A species in the learnset but absent from usage stats (e.g. never used)
+  // still gets a sensible list, just sorted by power.
+  const moves = topPotentialMoves('Rillaboom', 2);
+  assert.ok(moves.length >= 1);
+});
+
+test('topPotentialMoves excludes status moves and non-damaging moves', () => {
+  const top = topPotentialMoves('Dragonite', 5);
+  assert.ok(top.length >= 1);
+  // Dragon Dance is Dragonite's #1 usage move, but it's status — the
+  // "could have" list is for damage threats.
+  assert.ok(!top.includes('Dragon Dance'), 'status moves excluded');
 });
 
 test('worstThreat finds the strongest hidden move and excludes revealed ones', () => {

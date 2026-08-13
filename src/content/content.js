@@ -14,7 +14,7 @@
 
 import { BattleReader } from '../reader/index.js';
 import { buildPanelModel, renderPanel } from '../ui/panel.js';
-import { recommend } from '../engine/index.js';
+import { recommend, applyObservations } from '../engine/index.js';
 import { topPotentialMoves } from '../engine/movepool.js';
 import { createCapture } from './capture.js';
 import {
@@ -189,6 +189,12 @@ function tick() {
     // log — apply the parsed request directly (moves, items, PP, HP, tera).
     if (requestChanged && request) {
       reader.applyRequest(request);
+      didRender = true;
+    }
+    // Back-calculate the opponent's EV investment from observed damage
+    // (narrows per-mon evEstimate ranges consumed by the damage calc).
+    if (reader.state.observations.length > reader.state.obsProcessed) {
+      applyObservations(reader.state);
       didRender = true;
     }
     if (didRender) {

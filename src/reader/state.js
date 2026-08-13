@@ -22,6 +22,12 @@ export function createBattleState() {
     // Chronological record of meaningful actions (moves, switches, faints, ...)
     // with the turn they happened in — the raw material for opponent profiling.
     actions: [],
+    // Damage observations (move -> damage dealt, as % of the defender's max HP)
+    // — the raw material for back-calculating the opponent's EV investment.
+    // Bounded; each entry is { attacker, defender, move, damagePct, turn }.
+    observations: [],
+    // Index into `observations` already consumed by the stat estimator.
+    obsProcessed: 0,
   };
 }
 
@@ -68,6 +74,7 @@ export function createPokemon({ ident, side, species, gender, level }) {
     fainted: false,
     switchCount: 0,           // times this mon has switched in
     forcedSwitchIns: 0,       // times it was forced in (drag / pivoting user)
+    evEstimate: null,         // back-calculated EV ranges: { atk:[lo,hi], spa:[lo,hi], def:[lo,hi], spd:[lo,hi], hp:[lo,hi] } in EV points, or null
   };
 }
 

@@ -7,12 +7,13 @@
 
 import { readFileSync } from 'node:fs';
 import { parseLog } from '../src/reader/index.js';
-import { recommend } from '../src/engine/index.js';
+import { recommend, applyObservations } from '../src/engine/index.js';
 
 const file = process.argv[2] ?? 'test/fixtures/real-battle.log';
 const ourSideId = process.argv[3] ?? 'p1';
 
 const state = parseLog(readFileSync(file, 'utf8'));
+applyObservations(state); // back-calculate EV investment from observed damage
 const rec = recommend(state, { ourSideId });
 
 console.log(`\nBattle: ${state.format ?? '?'} | turn ${state.turn} | winner: ${state.winner ?? 'in progress'}\n`);

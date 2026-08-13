@@ -40,6 +40,23 @@ export function buildPanelModel(state, opts = {}) {
 
   const getPotential = opts.getPotentialMoves ?? null;
 
+  // Learned EV investment (back-calculated from observed damage) as a short
+  // label like "spa 252" / "def ~120", or null when nothing narrowed yet.
+  const evLabelOf = (mon) => {
+    const est = mon?.evEstimate;
+    if (!est) return null;
+    const parts = [];
+    for (const stat of ['atk', 'spa', 'def', 'spd', 'hp']) {
+      const r = est[stat];
+      if (!r) continue;
+      const width = r[1] - r[0];
+      if (width > 48) continue;
+      const val = Math.max(0, Math.min(252, Math.round((r[0] + r[1]) / 2 / 4) * 4));
+      parts.push(`${stat} ${width <= 4 ? val : `~${val}`}`);
+    }
+    return parts.length ? parts.join(' · ') : null;
+  };
+
   const cardOf = (mon, showPotential) => {
     const boosts = Object.fromEntries(Object.entries(mon.boosts ?? {}).filter(([, v]) => v !== 0));
     const hidden = Math.max(0, 4 - (mon.moves?.length ?? 0));
@@ -63,6 +80,7 @@ export function buildPanelModel(state, opts = {}) {
       movePp: { ...(mon.movePp ?? {}) },
       hiddenCount: hidden,
       observed: !!mon.observed,
+      evLabel: evLabelOf(mon),
       boosts,
       switchCount: mon.switchCount ?? 0,
       potential:
@@ -212,6 +230,9 @@ function renderCard(card) {
     teraText = ' · can tera';
   }
   const details = `item: ${itemText} · ability: ${card.ability ?? '?'}${teraText}`;
+  const evHtml = card.evLabel
+    ? `<div class="psa-ev" title="Back-calculated from observed damage">learned ev: ${escapeHtml(card.evLabel)}</div>`
+    : '';
   const moveText = card.moves
     .map((m) => {
       const pp = card.movePp?.[m];
@@ -240,6 +261,7 @@ function renderCard(card) {
   <div class="psa-card-moves">${movesHtml}</div>
   ${potentialHtml}
   <div class="psa-card-details">${escapeHtml(details)}</div>
+  ${evHtml}
   ${boostsText ? `<div class="psa-boosts">${escapeHtml(boostsText)}</div>` : ''}
 </div>`;
 }

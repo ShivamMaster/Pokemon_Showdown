@@ -365,6 +365,12 @@
   margin-top: 2px;
 }
 
+.psa-ev {
+  color: var(--psa-ok);
+  font-size: 11px;
+  margin-top: 2px;
+}
+
 .psa-muted {
   color: var(--psa-muted);
 }

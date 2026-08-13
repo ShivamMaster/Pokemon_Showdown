@@ -1,7 +1,7 @@
 // demo/demo.js — wires the reader + engine + panel into the demo page.
 import { BattleReader } from '../src/reader/index.js';
 import { buildPanelModel, renderPanel } from '../src/ui/panel.js';
-import { recommend } from '../src/engine/index.js';
+import { recommend, applyObservations } from '../src/engine/index.js';
 import { topPotentialMoves } from '../src/engine/movepool.js';
 
 const textarea = document.getElementById('log-input');
@@ -50,6 +50,8 @@ function render() {
 
   const ourSideId = sideSelect.value;
   const recState = snapshot ?? state;
+  // Back-calculate EV investment from the damage seen in the log.
+  applyObservations(recState);
   const recommendation = recommend(recState, { ourSideId });
   const model = buildPanelModel(recState, {
     ourSideId,

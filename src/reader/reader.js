@@ -183,6 +183,9 @@ export class BattleReader {
       case 'move':
         this._applyMove(event);
         break;
+      case 'crit':
+        this._applyCrit(event);
+        break;
       case 'damage':
       case 'heal':
         this._applyHpChange(event);
@@ -327,15 +330,23 @@ export class BattleReader {
     const target = event.args[2] && !event.args[2].startsWith('[') ? event.args[2] : null;
     if (target) mon.lastTarget = target;
     const sideId = sideOf(ident);
-    this._lastMoveBySide[sideId] = { move: moveName, ident };
+    this._lastMoveBySide[sideId] = { move: moveName, ident, target, flags: event.args.slice(2) };
     if (PIVOT_MOVES.has(moveName)) this._lastSwitchWasPivot[sideId] = true;
     this._recordAction('move', sideId, ident, { move: moveName, target });
+  }
+
+  // `|-crit|ident` right after a move — the calc can't predict crit damage,
+  // so flag the pending move and skip its damage observation.
+  _applyCrit(event) {
+    const sideId = sideOf(event.args[0]);
+    if (this._lastMoveBySide[sideId]) this._lastMoveBySide[sideId].crit = true;
   }
 
   _applyHpChange(event) {
     const ident = event.args[0];
     const mon = getPokemon(this.state, ident);
     if (!mon) return;
+    const prev = mon.hp ?? {};
     const hp = parseHp(event.args[1]);
     updateHp(mon, hp);
     this._revealFromExtras(mon, event.args.slice(2));
@@ -343,6 +354,33 @@ export class BattleReader {
       hpPercent: mon.hpPercent,
       status: hp?.status ?? null,
     });
+    // Damage observation for stat estimation: a clean move hit (no [from]
+    // extras, no crit/miss/spread, same-turn pairing via the last move by the
+    // other side that targeted this mon).
+    if (event.type !== 'damage') return;
+    if (event.args.slice(2).some((e) => /^\[from\]/.test(e ?? ''))) return;
+    const cur = hp?.cur;
+    const prevCur = prev.cur ?? (prev.max === 100 ? prev.cur : null);
+    const max = hp?.max ?? prev.max;
+    if (cur == null || prevCur == null || !max || cur >= prevCur) return;
+    const otherSide = sideOf(ident) === 'p1' ? 'p2' : 'p1';
+    const last = this._lastMoveBySide[otherSide];
+    if (!last || !last.move || last.crit) return;
+    if (last.flags.some((f) => /\[(miss|crit|spread)\]/.test(f ?? ''))) return;
+    if (last.target && last.target !== ident) return;
+    const damagePct = Math.round(((prevCur - cur) / max) * 1000) / 10;
+    if (damagePct <= 0 || damagePct > 100) return;
+    this.state.observations.push({
+      attacker: last.ident,
+      defender: ident,
+      move: last.move,
+      damagePct,
+      turn: this.state.turn,
+    });
+    if (this.state.observations.length > 200) {
+      this.state.observations.splice(0, this.state.observations.length - 200);
+      this.state.obsProcessed = Math.max(0, this.state.obsProcessed - 1);
+    }
   }
 
   _applyFaint(event) {

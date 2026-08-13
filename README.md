@@ -16,6 +16,13 @@ best move, built in stages:
    hover tooltips you inspect on screen (and can capture the tab for real);
    the engine is tera-aware and reasons over every move the opponent's
    Pokémon could still have.
+7. **Stat estimation** (done) — the engine back-calculates each side's EV
+   investment from observed damage and uses the learned stats in every calc.
+8. **Usage-weighted movepools** (done) — “could have” moves are ranked by real
+   Smogon usage stats instead of raw base power.
+9. **Speed-order awareness** (done) — the engine compares effective Speed
+   (EV ranges, boosts, paralysis, Choice Scarf, weather abilities, Tailwind,
+   Trick Room) and factors who moves first into move and switch advice.
 
 ## Stage 8: pixel OCR fallback
 
@@ -101,10 +108,15 @@ Three additions that give the engine more of what you know at the table:
   `scripts/build-learnsets.js` extracts a compact per-species move list from
   the official Showdown learnsets data into `src/engine/data/learnsets-lite.js`
   (regenerate with `npm run learnsets`; the output is committed so builds and
-  tests work offline). The recommendation then warns about specific hidden
-  threats (`⚠ their Dragonite could have Hurricane — it hits your Rillaboom
-  for ~79.8%`), and switching is penalized when a hidden move would maul the
-  candidate you're switching into.
+  tests work offline). The candidates are **weighted by real Smogon usage
+  stats**: `scripts/build-usage.js` downloads the monthly `gen9ou` moveset
+  stats into `src/engine/data/usage-lite.js` (regenerate with `npm run usage`),
+  so the panel's `could have:` list and the hidden-threat warnings reflect
+  what people actually run (`Great Tusk could have: Rapid Spin · Headlong
+  Rush · Ice Spinner`), not raw base power. The recommendation then warns
+  about specific hidden threats (`⚠ their Dragonite could have Hurricane —
+  it hits your Rillaboom for ~79.8%`), and switching is penalized when a
+  hidden move would maul the candidate you're switching into.
 
 ## Stage 5: per-opponent profiles, settings & options
 
@@ -234,15 +246,31 @@ captured from a real battle page and parses identically.
   the stats relevant to each calculation (attacker's attacking stat, defender's
   HP + defending stat) — you can switch to raw base stats with
   `opts.statAssumption: 'base'`. Type effectiveness comes from the calc
-  package's per-generation type chart. Tera is simulated with
+  package's per-generation type chart.
+- `statestimate.js` — **back-calculates the opponent's EV investment from
+  observed damage**. Every move hit is recorded by the reader as an
+  observation (attacker, move, defender, damage %), and the estimator
+  binary-searches the EV axis of the stat that matters (attacker atk/spa,
+  defender def/spd) to find the range whose predicted damage brackets what
+  was actually dealt. Ranges intersect across observations, so they narrow as
+  the battle goes on (and across battles, since mon records persist per
+  session). The learned midpoint feeds back into `buildPokemon`, replacing
+  the blanket 252-EV assumption for stats that have narrowed enough, and the
+  panel shows it as a `learned ev:` tag (e.g. `def ~8` for a mon that eats
+  hits badly). HP EVs are solved exactly whenever absolute max HP is revealed
+  (the live request's `condition`, absolute HP in the log, or a hover
+  tooltip). Single hits only pin wide ranges (damage rolls span 85-100%), so
+  it's honest about uncertainty — it reports a range, not a guess. Tera is simulated with
   `opts.attackerTera` / `opts.defenderTera` (the calc treats a set tera type
   as the terastallized state), and effectiveness is reported for the tera
   type when a defender is terastallized.
 - `movepool.js` — hidden-move reasoning: `potentialMoves(species)` from the
-  bundled Gen 9 learnsets, `worstThreat(theirMon, target)` (the strongest
-  move they haven't revealed yet, pre-scored by power × effectiveness × STAB
-  then damage-calc'd on the top candidates, memoized per state signature),
-  and `teamThreats(...)` across your whole team.
+  bundled Gen 9 learnsets, `usageWeight(species, move)` / usage-ranked
+  `topPotentialMoves(species, n)` from the bundled Smogon usage stats,
+  `worstThreat(theirMon, target)` (the strongest move they haven't revealed
+  yet, pre-scored by power × effectiveness × STAB blended with usage %, then
+  damage-calc'd on the top candidates, memoized per state signature), and
+  `teamThreats(...)` across your whole team.
 - `recommend.js` — the decision logic:
   - Each move is scored as expected damage vs their active Pokémon weighted by
     P(they stay), plus damage vs each benched mon weighted by P(switch-in),
@@ -341,6 +369,26 @@ pixel tooltip read, PP appears in the panel), and the live panel toggle.
 
 Tests cover a real 22-turn Gen 9 OU battle (`test/fixtures/real-battle.log`,
 fetched from Showdown replays) plus hand-crafted edge cases.
+
+### Speed-order awareness
+
+Before recommending a move, the engine compares each side's effective Speed
+and factors the outcome into the advice:
+
+- Speed is computed as a **range** (0 → 252 EVs, neutral → speed-boosting
+  nature) because the opponent's investment isn't visible. When the ranges
+  don't overlap, the engine says who moves first with certainty; overlapping
+  ranges are reported honestly as “could go either way.”
+- The reader's known modifiers are applied: **boost stages**, **paralysis**
+  (halved), **Choice Scarf** (while held), weather-based abilities (Swift
+  Swim in rain, Chlorophyll in sun, …), **Tailwind** per side, and **Trick
+  Room** (which flips the comparison).
+- In move evaluation: going for a KO while outspeeding gets a bonus; a move
+  that risks being KO'd before it lands (they outspeed and can KO) is
+  penalized and called out.
+- In switch evaluation: a switch-in that outspeeds their active is rewarded;
+  one that is outsped while eating heavy damage is penalized.
+- The panel's reasoning list always opens with the current speed situation.
 
 ### Known limitations
 

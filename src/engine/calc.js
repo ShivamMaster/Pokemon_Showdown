@@ -38,6 +38,23 @@ function baseEvs() {
   return evs;
 }
 
+// Overlay a mon's back-calculated EV ranges onto the caller's EV set. Only
+// stats with a narrowed range are used (midpoint). The estimator disables
+// this via `useEstimates: false` so its pinned-EV probes stay exact.
+function estimatedEvs(mon) {
+  const est = mon?.evEstimate;
+  if (!est) return {};
+  const out = {};
+  for (const s of ['atk', 'spa', 'def', 'spd', 'hp']) {
+    const r = est[s];
+    if (!r) continue;
+    const width = r[1] - r[0];
+    if (width > 48) continue; // too wide to trust
+    out[s] = Math.max(0, Math.min(252, Math.round((r[0] + r[1]) / 2 / 4) * 4));
+  }
+  return out;
+}
+
 function baseIvs() {
   const ivs = {};
   for (const s of STATS) ivs[s] = 31;
@@ -51,11 +68,11 @@ function baseIvs() {
 // `teraType` overrides the tera type when the mon has NOT terastallized yet —
 // this is how the engine simulates "what if we terastallize now" (the calc
 // treats a set teraType as the terastallized state).
-export function buildPokemon(gen, mon, evs = {}, teraType = null) {
+export function buildPokemon(gen, mon, evs = {}, teraType = null, useEstimates = true) {
   const opts = {
     level: mon?.level ?? 100,
     nature: 'Serious',
-    evs: { ...baseEvs(), ...evs },
+    evs: useEstimates ? { ...baseEvs(), ...evs, ...estimatedEvs(mon) } : { ...baseEvs(), ...evs },
     ivs: baseIvs(),
   };
   if (mon?.itemRevealed && !mon?.itemConsumed && mon?.item) opts.item = mon.item;
@@ -89,13 +106,19 @@ export function damagePercent(gen, atkMon, defMon, moveName, field, opts = {}) {
   } catch {
     return null;
   }
-  const atkEvs = move.category === 'Physical' ? { atk: 252 } : { spa: 252 };
-  const defEvs = move.category === 'Physical' ? { hp: 252, def: 252 } : { hp: 252, spd: 252 };
+  // The estimator pins one stat to a candidate EV while everything else stays
+  // at defaults: `opts.attackerEvs` / `opts.defenderEvs` fully override the
+  // category-based defaults for that side.
+  const atkEvs =
+    opts.attackerEvs ?? (move.category === 'Physical' ? { atk: 252 } : { spa: 252 });
+  const defEvs =
+    opts.defenderEvs ?? (move.category === 'Physical' ? { hp: 252, def: 252 } : { hp: 252, spd: 252 });
+  const useEstimates = opts.useEstimates !== false;
   let attacker;
   let defender;
   try {
-    attacker = buildPokemon(gen, atkMon, statAssumption === 'base' ? {} : atkEvs, opts.attackerTera ?? null);
-    defender = buildPokemon(gen, defMon, statAssumption === 'base' ? {} : defEvs, opts.defenderTera ?? null);
+    attacker = buildPokemon(gen, atkMon, statAssumption === 'base' && !opts.attackerEvs ? {} : atkEvs, opts.attackerTera ?? null, useEstimates);
+    defender = buildPokemon(gen, defMon, statAssumption === 'base' && !opts.defenderEvs ? {} : defEvs, opts.defenderTera ?? null, useEstimates);
   } catch {
     // Unknown species the calc can't build — skip this matchup.
     return null;

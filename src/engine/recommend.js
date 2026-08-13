@@ -20,6 +20,7 @@
 
 import { damagePercent, buildField, round1 } from './calc.js';
 import { worstThreat, teamThreats } from './movepool.js';
+import { speedOrder, speedLine } from './speed.js';
 
 const clamp01 = (n) => Math.max(0, Math.min(1, n));
 
@@ -98,6 +99,7 @@ export function predictSwitchProbs(theirActive, theirTeam, stayProb, profile = n
 }
 
 export function mostLikelySwitchIn(team, profile = null) {
+  if (!team?.length) return null;
   let best = team[0];
   let bestW = -1;
   for (const m of team) {
@@ -114,7 +116,7 @@ export function mostLikelySwitchIn(team, profile = null) {
 // Move evaluation
 // ---------------------------------------------------------------------------
 
-export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayProb, switchProbs, gen, field, calcOpts = {}) {
+export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayProb, switchProbs, gen, field, calcOpts = {}, speed = null) {
   const vsTarget = damagePercent(gen, attacker, theirTarget, moveName, field, calcOpts);
   if (!vsTarget) return null;
 
@@ -148,11 +150,32 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
   const koGuaranteed = vsTarget.min >= targetHp;
   if (ko) score += 10;
 
+  // Speed-order awareness: going for the KO is much safer when we move first,
+  // and much riskier when they outspeed us and can hit back before we act.
+  let speedNote = null;
+  if (speed) {
+    if (speed.weMoveFirst === true && ko) {
+      score += 8;
+      speedNote = 'you outspeed — safe to go for the KO';
+    } else if (speed.weMoveFirst === false) {
+      const theirDmg = incomingPercent(theirTarget, attacker, gen, field, calcOpts).pct;
+      const ourHp = attacker.hpPercent ?? 100;
+      if (theirDmg >= ourHp) {
+        score -= 12;
+        speedNote = `they outspeed and can KO you first (~${round1(theirDmg)}%)`;
+      } else if (theirDmg >= 40) {
+        score -= 5;
+        speedNote = `they outspeed — expect ~${round1(theirDmg)}% back before you move`;
+      }
+    }
+  }
+
   const effText = effLabel(vsTarget.effectiveness);
   const seHits = benchDmg.filter((b) => b.eff >= 2).map((b) => b.ident.split(': ')[1]).slice(0, 2);
   const parts = [`~${vsTarget.mean}% vs ${theirTarget.species}`];
   if (effText) parts.push(effText);
   if (ko) parts.push(koGuaranteed ? 'guaranteed KO' : 'can KO');
+  if (speedNote) parts.push(speedNote);
   if (seHits.length) parts.push(`also hits ${seHits.join(', ')} super effectively`);
   const note = `${moveName}: ${parts.join(' · ')}`;
 
@@ -196,7 +219,7 @@ export function ownBestDamage(candidate, theirTarget, gen, field, calcOpts = {})
   return max;
 }
 
-export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, calcOpts = {}) {
+export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, calcOpts = {}, speedCtx = null) {
   const now = incomingPercent(theirActive, ourActive, gen, field, calcOpts);
   const cand = incomingPercent(theirActive, candidate, gen, field, calcOpts);
   const candOff = ownBestDamage(candidate, theirActive, gen, field, calcOpts);
@@ -207,6 +230,19 @@ export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, ca
     `Switch to ${candidate.species}: takes ~${round1(cand.pct)}% from ${theirMove} ` +
     `(vs ~${round1(now.pct)}% for ${ourActive.species})` +
     (candOff ? `, hits back for ~${round1(candOff)}%` : '');
+
+  // Speed awareness: an incoming mon that outspeeds their active gets to act
+  // first (much safer); one that's outsped while taking heavy damage is risky.
+  if (speedCtx?.state && theirActive) {
+    const order = speedOrder(candidate, theirActive, speedCtx.state.gen ?? gen, speedCtx.state, speedCtx.ourSideId);
+    if (order.weMoveFirst === true) {
+      net += 5;
+      note += `; ${candidate.species} outspeeds their ${theirActive.species} — moves first`;
+    } else if (order.weMoveFirst === false && cand.pct >= 40) {
+      net -= 8;
+      note += `; but their ${theirActive.species} outspeeds ${candidate.species} — it hits first`;
+    }
+  }
   // The switch assessment only sees their revealed moves. If their species
   // could know a hidden move that mauls this candidate, penalize the switch
   // and say so — the decision should account for what they might have.
@@ -322,22 +358,36 @@ export function recommend(state, opts = {}) {
     stayProb = 1;
     switchProbs = {};
     reasoning.push(`${predicted?.species ?? 'A new Pokémon'} is the most likely switch-in (their active is down).`);
+    // No one left to predict (their whole team is down) — nothing to advise.
+    if (!theirTarget) {
+      return {
+        bestMove: null,
+        switchTo: null,
+        reasoning: ['All of their Pokémon are down — awaiting the win screen.'],
+        note: null,
+      };
+    }
   } else {
     stayProb = predictStayProb(theirTarget, profile);
     switchProbs = predictSwitchProbs(theirTarget, theirTeam, stayProb, profile);
+    // Speed ordering only makes sense against their actual active — against a
+    // predicted switch-in the match-up could change entirely.
+    reasoning.push(speedLine(ourActive, theirTarget, gen, state, ourSideId));
   }
 
   const bench = ourTeam.filter((m) => m.ident !== ourActive.ident);
 
   const moveEvals = [];
+  const speed = speedOrder(ourActive, theirTarget, gen, state, ourSideId);
   for (const moveName of ourActive.moves) {
-    const ev = evaluateMove(ourActive, moveName, theirTarget, theirTeam, stayProb, switchProbs, gen, field, calcOpts);
+    const ev = evaluateMove(ourActive, moveName, theirTarget, theirTeam, stayProb, switchProbs, gen, field, calcOpts, speed);
     if (ev) moveEvals.push(ev);
   }
   moveEvals.sort((a, b) => b.score - a.score);
 
+  const speedCtx = { state, ourSideId };
   const switchEvals = bench
-    .map((m) => evaluateSwitch(ourActive, m, theirTarget, gen, field, calcOpts))
+    .map((m) => evaluateSwitch(ourActive, m, theirTarget, gen, field, calcOpts, speedCtx))
     .filter(Boolean)
     .sort((a, b) => b.net - a.net);
 
