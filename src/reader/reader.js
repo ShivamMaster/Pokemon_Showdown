@@ -16,7 +16,7 @@ import {
   updateHp,
 } from './state.js';
 import { parseLine } from './parser.js';
-import { displayMoveName } from './movenames.js';
+import { displayMoveName, displayAbilityName, displayItemName } from './movenames.js';
 
 // Moves that force the user to switch after use (Volt Switch etc.). A switch
 // immediately after one of these is treated as forced, not a free choice.
@@ -79,6 +79,18 @@ export class BattleReader {
     if (!event) return null;
     this.applyEvent(event);
     return event;
+  }
+
+  // Live-only: the client intercepts `|request|` and never puts it in the
+  // log, so callers hand us the parsed request object directly (usually from
+  // `app.curRoom.request`). Same handler as the log path.
+  applyRequest(request) {
+    if (!request) return;
+    try {
+      this._applyRequest(typeof request === 'string' ? request : JSON.stringify(request));
+    } catch {
+      // malformed request data — ignore, the log pipeline keeps working
+    }
   }
 
   // Drop all parsed state (e.g. when a new battle starts).
@@ -251,6 +263,14 @@ export class BattleReader {
         (r) => r.ident === null && (!details.species || r.species === details.species)
       );
       if (slot) slot.ident = ident;
+      // A request-created record may exist under a plain ident (`p1: X`);
+      // adopt the active-slot ident (`p1a: X`) so later events find it.
+      if (details.species) {
+        mon = side.pokemon.find((m) => m.species === details.species) ?? null;
+        if (mon) mon.ident = ident;
+      }
+    }
+    if (!mon) {
       mon = createPokemon({ ident, side: sideId, species: details.species });
       side.pokemon.push(mon);
     } else if (details.species) {
@@ -456,9 +476,15 @@ export class BattleReader {
     if (!side) return;
     for (const p of req.side.pokemon ?? []) {
       if (!p?.ident) continue;
+      const d = parseDetails(p.details);
       let mon = getPokemon(this.state, p.ident);
       if (!mon) {
-        const d = parseDetails(p.details);
+        // The request uses plain idents (`p1: X`) while switch lines use
+        // active-slot idents (`p1a: X`). Reuse by species so we don't create
+        // a duplicate record the switch handler will never find.
+        mon = side.pokemon.find((m) => m.species === d.species) ?? null;
+      }
+      if (!mon) {
         mon = createPokemon({ ident: p.ident, side: side.id, species: d.species, gender: d.gender, level: d.level });
         side.pokemon.push(mon);
       }
@@ -472,17 +498,24 @@ export class BattleReader {
           }
         }
       }
-      if (p.item) {
-        mon.item = p.item;
+      if (p.item && p.item !== 'unknown') {
+        mon.item = displayItemName(this.state.gen ?? 9, p.item);
         mon.itemRevealed = true;
       }
+      if (p.baseAbility) mon.ability = displayAbilityName(this.state.gen ?? 9, p.baseAbility);
+      else if (p.ability) mon.ability = displayAbilityName(this.state.gen ?? 9, p.ability);
       if (p.condition) {
         const hp = parseHp(p.condition);
         if (hp && hp.cur != null) updateHp(mon, hp);
       }
       if (p.active) {
         mon.active = true;
-        if (!side.active.includes(mon.ident)) side.active.push(mon.ident);
+        // Don't touch side.active here: switch lines own the active-slot
+        // bookkeeping (and use slot idents like `p1a:` that this request
+        // record may not have yet). The `mon.active` flag is enough.
+      } else if (mon.active && !this.state.started) {
+        // Team preview: nothing is on the field yet.
+        mon.active = false;
       }
       // Gen 9 request data: teraType (always present), terastallized (current
       // tera type), and canTera/canTerastallize on the active entries below.

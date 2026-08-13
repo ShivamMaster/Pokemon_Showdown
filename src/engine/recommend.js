@@ -282,10 +282,28 @@ export function recommend(state, opts = {}) {
   }
 
   let ourActive = activeMon(ourSide);
+  const theirActive = activeMon(theirSide);
+
+  // Battle hasn't started yet (team preview / just loaded in): both sides are
+  // off the field, so there's no move or switch advice to give — the panel
+  // should say so instead of guessing a switch-in against no target.
+  if (!ourActive && !theirActive) {
+    const teamKnown = ourSide?.pokemon?.length ?? 0;
+    return {
+      bestMove: null,
+      switchTo: null,
+      reasoning: [
+        teamKnown
+          ? 'Battle not started — team preview in progress.'
+          : 'Waiting for the battle to start…',
+      ],
+      note: null,
+    };
+  }
 
   // Our active is down — must send in a replacement.
   if (!ourActive) {
-    const s = bestSwitchIn(ourTeam, activeMon(theirSide), gen, field, profile, calcOpts);
+    const s = bestSwitchIn(ourTeam, theirActive, gen, field, profile, calcOpts);
     return {
       bestMove: null,
       switchTo: s,

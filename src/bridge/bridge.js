@@ -39,3 +39,41 @@ chrome.storage.onChanged.addListener((changes, area) => {
     window.postMessage({ psa: CHANGED, key, value: newValue }, '*');
   }
 });
+
+// Main world -> background: report whether the assistant is actively watching
+// a battle, so the toolbar icon can carry a LIVE badge. chrome.runtime is not
+// reachable from the MAIN world, so the isolated world forwards it.
+window.addEventListener('message', (ev) => {
+  if (ev.source !== window || ev.data?.psa !== 'psa-badge-req') return;
+  chrome.runtime.sendMessage({ psa: 'psa-badge', state: ev.data.state }).catch(() => {});
+});
+
+// Background -> main world: the popup obtained a tab-capture stream id
+// (user gesture) and the worker forwards it here; relay it into the page
+// world so the capture module can start the stream.
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.psa === 'psa-capture-start' || msg?.psa === 'psa-capture-stop') {
+    window.postMessage({ psa: msg.psa, streamId: msg.streamId }, '*');
+    sendResponse({ ok: true });
+  }
+});
+
+// Main world -> OCR: the main-world content script cannot use chrome.runtime
+// (it's a page-context script), so the isolated world forwards OCR requests
+// to the worker/offscreen document and posts the text back. ImageData pixels
+// survive structured clone through postMessage + chrome.runtime messaging.
+window.addEventListener('message', (ev) => {
+  if (ev.source !== window || ev.data?.psa !== 'psa-ocr-req') return;
+  const { id, width, height, pixels } = ev.data;
+  // chrome.runtime messaging JSON-serializes, which mangles typed arrays —
+  // convert to a plain array first so the pixels survive to the offscreen doc.
+  const plain = pixels instanceof Uint8ClampedArray || pixels instanceof Uint8Array ? Array.from(pixels) : pixels;
+  chrome.runtime
+    .sendMessage({ psa: 'psa-ocr-req', id, width, height, pixels: plain })
+    .then((res) => {
+      window.postMessage({ psa: 'psa-ocr-res', id, text: res?.text, error: res?.error }, '*');
+    })
+    .catch((err) => {
+      window.postMessage({ psa: 'psa-ocr-res', id, error: String(err?.message ?? err) }, '*');
+    });
+});

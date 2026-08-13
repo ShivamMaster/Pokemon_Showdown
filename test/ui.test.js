@@ -167,3 +167,96 @@ test('render: our-side selection (we are p2)', () => {
   assert.equal(m.meta.oppName, 'BaddyGames');
   assert.equal(m.us.team.filter((c) => c.active)[0].species, 'Dragonite');
 });
+
+test('model+render: watching status row and observed tags', () => {
+  // Default: the hint is shown, no count yet.
+  const m0 = buildPanelModel(state);
+  assert.equal(m0.watching.count, 0);
+  assert.equal(m0.watching.last, null);
+  const html0 = renderPanel(m0);
+  assert.ok(html0.includes('watching your screen — hover a Pokémon to read it'));
+  assert.ok(!html0.includes('read 1 tooltip'));
+
+  // After hovers: the counter and last-read species appear.
+  const m = buildPanelModel(state, { watching: { count: 2, last: 'Rillaboom' } });
+  assert.equal(m.watching.count, 2);
+  const html = renderPanel(m);
+  assert.ok(html.includes('read 2 tooltips · last: Rillaboom'));
+  assert.ok(html.includes('psa-watch'));
+
+  // Observed cards carry a 👁 tag.
+  const tagged = parseLog(realLog);
+  const dn = tagged.sides.p2.pokemon.find((p) => p.species === 'Dragonite');
+  dn.observed = true;
+  const htmlTagged = renderPanel(buildPanelModel(tagged));
+  assert.ok(htmlTagged.includes('psa-tag-observed'));
+  assert.ok(htmlTagged.includes('👁'));
+});
+
+test('model+render: six-slot grid per side with placeholders', () => {
+  const m = buildPanelModel(state);
+  // Both teams show exactly 6 slots.
+  assert.equal(m.us.slots.length, 6);
+  assert.equal(m.them.slots.length, 6);
+  // The fixture has full teams, so every slot is filled.
+  assert.equal(m.us.slots.filter((s) => s.empty).length, 0);
+  assert.equal(m.them.slots.filter((s) => s.empty).length, 0);
+
+  const html = renderPanel(m);
+  assert.ok(html.includes('psa-slot-grid'));
+  // Six cards per side in the grid.
+  assert.equal((html.match(/psa-card/g) ?? []).length >= 12, true);
+
+  // A partially-revealed side keeps the 6 slots: species are known from team
+  // preview (|poke|) and shown as preview cards, not blank placeholders.
+  const partial = parseLog(realLog.split('\n').slice(0, 60).join('\n'));
+  const mp = buildPanelModel(partial);
+  assert.equal(mp.us.slots.length, 6);
+  const previews = mp.us.slots.filter((s) => s.preview);
+  assert.ok(previews.length >= 3, 'preview cards show roster species before reveal');
+  assert.ok(previews.some((s) => s.species === 'Kingambit'));
+  const htmlP = renderPanel(mp);
+  assert.ok(htmlP.includes('psa-preview'));
+  assert.ok(htmlP.includes('Kingambit'));
+  // Slots beyond the known roster stay empty placeholders.
+  const emptyOnly = buildPanelModel(parseLog('|player|p1|A|lucas|\n|player|p2|B|ethan|\n|gen|9|'));
+  assert.ok(emptyOnly.us.slots.every((s) => s.empty));
+});
+
+test('model+render: potential moves shown for the opponent only', () => {
+  const fake = { species: 'Dragonite' };
+  const m = buildPanelModel(state, {
+    getPotentialMoves: (s) => (s === 'Dragonite' ? ['Hurricane', 'Earthquake', 'Fire Punch'] : []),
+  });
+  // Dragonite has 2 revealed moves -> 2 hidden -> potential list populated.
+  const themDn = m.them.slots.find((c) => !c.empty && c.species === 'Dragonite');
+  assert.deepEqual(themDn.potential, ['Hurricane', 'Earthquake', 'Fire Punch']);
+  // Our side never gets potential moves (we know our own sets).
+  const usRb = m.us.slots.find((c) => !c.empty && c.species === 'Raging Bolt');
+  assert.equal(usRb.potential.length, 0);
+
+  const html = renderPanel(m);
+  assert.ok(html.includes('psa-potential'));
+  assert.ok(html.includes('could have: Hurricane · Earthquake · Fire Punch'));
+});
+
+test('model+render: capture status row', () => {
+  // Idle: the watch row hints at hover-reading only.
+  const m0 = buildPanelModel(state, { capture: { active: false, frames: 0, changes: 0 } });
+  const html0 = renderPanel(m0);
+  assert.ok(html0.includes('watching your screen'));
+  assert.ok(!html0.includes('capturing screen'));
+  assert.ok(!html0.includes('psa-watch-live'));
+
+  // Live: the row reports frames/changes and gets the live class + ● icon.
+  const m1 = buildPanelModel(state, { capture: { active: true, frames: 42, changes: 7 } });
+  assert.equal(m1.capture.active, true);
+  const html1 = renderPanel(m1);
+  assert.ok(html1.includes('● capturing screen · 42 frames · 7 changes seen'));
+  assert.ok(html1.includes('psa-watch-live'));
+
+  // Frames increment renders (partial state).
+  const m2 = buildPanelModel(state, { capture: { active: true, frames: 43, changes: 8 } });
+  const html2 = renderPanel(m2);
+  assert.ok(html2.includes('43 frames · 8 changes'));
+});

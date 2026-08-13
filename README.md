@@ -13,8 +13,64 @@ best move, built in stages:
 5. **Profiles** (done) — per-opponent learning: battle histories, switching
    tendencies, common leads, and move usage, fed back into the engine.
 6. **Screen reading, tera & movepools** (done) — the extension watches the
-   hover tooltips you inspect on screen; the engine is tera-aware and reasons
-   over every move the opponent's Pokémon could still have.
+   hover tooltips you inspect on screen (and can capture the tab for real);
+   the engine is tera-aware and reasons over every move the opponent's
+   Pokémon could still have.
+
+## Stage 8: pixel OCR fallback
+
+- **Real OCR of the captured frames** — when the client renders a tooltip
+  that never appears as a DOM element (canvas-rendered tooltip, a client
+  change, or a slow render), the extension now reads the pixels instead:
+  the capture video (full tab resolution) is cropped to the region where
+  the tooltip appears (above-left of the hovered icon), the pixels are sent
+  to an **offscreen document** (`src/offscreen/offscreen.js`), and tesseract
+  (`tesseract.js`, assets bundled locally in `extension/dist/ocr/` — worker,
+  core wasm variants, and the English traineddata — so it works offline)
+  recognizes the text. The result parses through the same tooltip parser and
+  feeds the same observation pipeline, so a recovered tooltip contributes
+  moves, PP, items, abilities, and tera exactly like a DOM-read one.
+- **Why an offscreen document** — the main content script runs in the page's
+  MAIN world where `chrome.runtime` is unavailable, and content-script
+  workers can't fetch extension resources; a hidden offscreen page is a full
+  extension context where tesseract's worker + wasm + data all load
+  normally. The bridge (isolated world) relays the pixel array between the
+  page and the worker (converting to a plain array because chrome.runtime
+  messaging JSON-serializes — typed arrays arrive mangled otherwise).
+- **Trigger** — the tooltip observer already tracks hovers on Pokémon icons;
+  if a hover fires but no `.tooltip.tooltip-pokemon` element materializes
+  within a short window, and the tab capture is live, the fallback runs.
+  OCR is serialized (overlapping hovers are dropped), the watch row shows
+  `N via OCR` when pixel reads succeed, and the E2E proves it end-to-end:
+  with the DOM tooltip suppressed and the text drawn as plain pixels,
+  hovering surfaces `Dragon Pulse (15/16)` in the panel.
+- **Costs** — the OCR assets add ~28MB to the extension folder (downloaded
+  once at build time by `scripts/build-ocr-assets.js`), the first OCR needs
+  a few seconds to load the engine, and tesseract is best-effort: clean,
+  high-contrast tooltips read well, but it stays a fallback — the fast,
+  exact DOM reading is still the primary path.
+
+## Stage 7: real screen capture & the 6-slot grid
+
+- **Real tab capture** (`src/content/capture.js`) — the popup's *Start
+  watching screen* button grabs the tab's MediaStream via
+  `chrome.tabCapture.getMediaStreamId` (a user-gesture-only API — it's why
+  the stream is started from the popup, with `consumerTabId` set so the
+  content script can consume it). The content script renders frames to a
+  small canvas and tracks live stats; while the stream is active, **Chrome
+  shows its own screen-sharing indicator** (the visible proof you asked for)
+  and the panel reports `● capturing screen · N frames · M changes seen`.
+  The pixels feed change detection (hover tooltips, HP movement) **and the
+  OCR fallback** (Stage 8); the fast, exact tooltip reading stays DOM-based
+  on top of it.
+- **Six-slot grid** — under *You* and *Opponent* each side renders six boxes
+  (team-preview order for the opponent, request order for you). Empty slots
+  are dashed placeholders (`not revealed yet`) that fill in as Pokémon are
+  revealed, so you can see the whole picture at a glance.
+- **Potential moves on the grid** — each opponent card with unrevealed
+  moves shows `could have: …` (top candidates from the Gen 9 learnsets),
+  so as they reveal their team you see both what they've shown and what
+  they might still be holding.
 
 ## Stage 6: screen reading, tera & movepools
 
@@ -25,9 +81,14 @@ Three additions that give the engine more of what you know at the table:
   client renders a tooltip on screen; the extension observes it and merges
   what it says into the battle state: extra moves, **PP counts** (the log
   never shows PP), items, abilities, and tera types. The panel shows PP next
-  to moves (`Dragon Pulse (15/16)`). Verified against the real client's
-  tooltip markup and end-to-end in the E2E (hover a team icon → the panel
-  picks up the PP).
+  to moves (`Dragon Pulse (15/16)`), and a `👁 watching your screen` status
+  row plus a panel flash give instant feedback on **every** hover (the E2E
+  hovers the same Pokémon twice and the read counter increments both times).  Verified against the real client's
+  tooltip markup and end-to-end in the E2E. While a battle is being watched,
+  the toolbar ⚡ icon carries a green **LIVE** badge (set by the service
+  worker from the content script's battle reports) — the Chrome-level
+  indicator that it's active. For the Chrome screen-sharing indicator, use
+  the popup's *Start watching screen* (Stage 7).
 - **Tera** — the reader ingests tera data from the live `|request|`
   (`teraType`/`terastallized` per Pokémon, `canTerastallize` for the active),
   the damage calc passes tera through (and a previously-buggy effectiveness
@@ -68,6 +129,21 @@ engine's switch prediction is sharpened immediately) and records the finished
 battle at the end. The panel shows a compact `vs <opponent>` strip with the
 record and learned tendencies.
 
+### Friend names & alternate usernames
+
+Profiles are resolved by *any* of the usernames mapped to them, so a friend
+who plays under different accounts still gets one profile:
+
+- Each profile has a **display name** (the friend's real name if you want)
+  and an **aliases** list of usernames that map to it.
+- Battles under any alias record into that profile — the panel shows the
+  friend's name (`vs John · record …`) instead of the raw username.
+- In the **options page**, click a profile's name to rename it (the old name
+  is kept as an alias automatically), add usernames with the *Also plays
+  as:* input, and remove them with the × button.
+- `findProfileKey` resolves usernames through aliases (case-insensitive);
+  `loadProfiles` normalizes aliases and re-keys old-format stored data.
+
 ### Settings, options & the storage bridge
 
 Profiles and settings persist through **`chrome.storage.local`** via a unified
@@ -83,7 +159,10 @@ page apply to open battles immediately.
 - **Options page** (`src/options/`) — toggle the panel, choose the damage
   engine's stat assumption (typical 252-EV builds vs base stats), and manage
   the learned profiles (view, delete one, clear all).
-- **Popup** (`src/popup/`) — quick panel on/off and a link to options.
+- **Popup** (`src/popup/`) — quick panel on/off, **Start / Stop watching
+  screen** (real tab capture via `chrome.tabCapture` — requires the
+  `tabCapture` permission, which the manifest declares), and a link to
+  options.
 - **Icons** — generated at build time by `scripts/make-icons.js`, a
   dependency-free PNG encoder (Node's built-in `zlib`).
 - **Settings** (`src/settings.js`) — `panelEnabled` and `statAssumption`,
@@ -126,15 +205,22 @@ The E2E uses Chrome for Testing because managed/system Chrome blocks
 npx @puppeteer/browsers install chrome@stable --path /tmp/cft-chrome
 ```
 
-Tests (101): the reader (real battle + edge cases, the live `|request|`
+Tests (128): the reader (real battle + edge cases, the live `|request|`
 fixture with moves/PP/tera/canTera, and hover observations), the UI
-renderer, the engine (type advantage, KO detection, switch advice, utility
-moves, calc consistency, switch prediction, tera effectiveness + tera
-suggestions, hidden-move warnings, the real fixture), the movepool
-(learnsets, worst-case hidden threats, terastallized attackers), the tooltip
-parser (real captured tooltip text, mon resolution), the profiles, the
-storage driver, the settings module, and the options-page rendering. The
-live client protocol fixture (`test/fixtures/live-stepqueue.json`) was
+renderer (including the six-slot grid, opponent potential-moves line, and
+capture status row), the engine (type advantage, KO detection, switch
+advice, utility moves, calc consistency, switch prediction, tera
+effectiveness + tera suggestions, hidden-move warnings, the real fixture),
+the movepool (learnsets, worst-case hidden threats, terastallized
+attackers), the tooltip parser (real captured tooltip text, mon resolution,
+and noisy OCR text with stray scene lines), the OCR client (message
+protocol, error + timeout handling) and offscreen module (pixel
+reconstruction, async handler contract), the capture module (frame
+hashing, start/stop lifecycle, failure handling, region grabbing), the
+profiles (including friend aliases: key resolution, rename-keeps-alias,
+add/remove alias, normalization on load), the storage driver, the settings
+module, and the options-page rendering (rename inputs + alias controls).
+The live client protocol fixture (`test/fixtures/live-stepqueue.json`) was
 captured from a real battle page and parses identically.
 
 ## Stage 3: engine
@@ -237,17 +323,21 @@ reader.applyLine(line); // one protocol line at a time
 npm test
 ```
 
-101 tests cover the reader (real 22-turn Gen 9 OU battle + edge cases),
-the UI (model, HTML output, escaping, mid-battle and empty states), the
-engine (type advantage, KO detection, switch advice, utility moves, calc
-consistency, switch prediction, tera, movepool threats, the real fixture),
-the tooltip parser, the movepool, the profiles, the storage driver, the
-settings module, and the options-page rendering. The demo page is also
-verified end-to-end by rendering it in headless Chrome, and the extension
-itself is verified end-to-end: a real battle page is loaded with the actual
-built extension, and the E2E checks the live panel, profile recording, a
+128 tests cover the reader (real 22-turn Gen 9 OU battle + edge cases),
+the UI (model, HTML output, escaping, mid-battle and empty states, the
+six-slot grid, potential moves, capture status), the engine (type
+advantage, KO detection, switch advice, utility moves, calc consistency,
+switch prediction, tera, movepool threats, the real fixture), the tooltip
+parser (including noisy OCR text), the movepool, the OCR client + offscreen
+module, the capture module, the profiles, the storage driver, the settings
+module, and the options-page rendering. The demo page is also verified
+end-to-end by rendering it in headless Chrome, and the extension itself is
+verified end-to-end: a real battle page is loaded with the actual built
+extension, and the E2E checks the live panel, profile recording, a
 hover-tooltip observation (PP appears in the panel), persistence across a
-page reload, the options page, the popup, and the live panel toggle.
+page reload, the options page, the popup, **real tab capture** (start →
+frames increment → stop), **the OCR fallback** (DOM tooltip suppressed,
+pixel tooltip read, PP appears in the panel), and the live panel toggle.
 
 Tests cover a real 22-turn Gen 9 OU battle (`test/fixtures/real-battle.log`,
 fetched from Showdown replays) plus hand-crafted edge cases.

@@ -10,6 +10,10 @@ import {
   updateProfile,
   profileForEngine,
   profileForDisplay,
+  findProfileKey,
+  renameProfile,
+  addProfileAlias,
+  removeProfileAlias,
 } from '../src/profiles/index.js';
 import { loadProfiles, saveProfiles } from '../src/profiles/store.js';
 import { parseLog } from '../src/reader/reader.js';
@@ -240,6 +244,89 @@ test('store: save/load round-trips profiles through the memory fallback', async 
   assert.equal(loaded.vkhss.totalBattles, 1);
   assert.equal(loaded.vkhss.record.win, 1);
   assert.deepEqual(loaded.vkhss.battles[0].movesUsed['Dragonite'], ['Encore', 'Scale Shot']);
+});
+
+// ---------------------------------------------------------------------------
+// Friend naming + username aliases
+// ---------------------------------------------------------------------------
+
+test('findProfileKey matches by display name and by alias', () => {
+  const profiles = {
+    john: {
+      opponent: 'John',
+      aliases: ['vkhss', 'baddygames'],
+      battles: [],
+      totalBattles: 3,
+      record: { win: 2, loss: 1, tie: 0 },
+    },
+    alice: { opponent: 'alice', aliases: [], battles: [], totalBattles: 1, record: { win: 0, loss: 1, tie: 0 } },
+  };
+  assert.equal(findProfileKey(profiles, 'John'), 'john');
+  assert.equal(findProfileKey(profiles, 'JOHN'), 'john');
+  assert.equal(findProfileKey(profiles, 'vkhss'), 'john');
+  assert.equal(findProfileKey(profiles, 'Vkhss'), 'john');
+  assert.equal(findProfileKey(profiles, 'alice'), 'alice');
+  assert.equal(findProfileKey(profiles, 'stranger'), null);
+  assert.equal(findProfileKey(profiles, ''), null);
+  assert.equal(findProfileKey({}, 'vkhss'), null);
+});
+
+test('renameProfile sets the display name and keeps the old name as an alias', () => {
+  let p = { opponent: 'vkhss', aliases: [], battles: [], totalBattles: 2, record: { win: 1, loss: 1, tie: 0 } };
+  p = renameProfile(p, 'John');
+  assert.equal(p.opponent, 'John');
+  assert.deepEqual(p.aliases, ['vkhss']);
+  assert.equal(findProfileKey({ john: p }, 'vkhss'), 'john');
+  // Renaming again keeps both old names as aliases.
+  p = renameProfile(p, 'Johnny');
+  assert.deepEqual(p.aliases, ['vkhss', 'john']);
+  assert.equal(renameProfile(p, '   '), p); // blank rename is a no-op
+});
+
+test('addProfileAlias / removeProfileAlias dedupe and normalize', () => {
+  let p = { opponent: 'John', aliases: [], battles: [], totalBattles: 0, record: { win: 0, loss: 0, tie: 0 } };
+  p = addProfileAlias(p, 'Vkhss');
+  p = addProfileAlias(p, 'vkhss');
+  assert.deepEqual(p.aliases, ['vkhss']);
+  p = addProfileAlias(p, 'BaddyGames');
+  assert.deepEqual(p.aliases, ['vkhss', 'baddygames']);
+  // The display name itself is already an implicit match — not added.
+  assert.equal(addProfileAlias(p, 'John'), p);
+  p = removeProfileAlias(p, 'vkhss');
+  assert.deepEqual(p.aliases, ['baddygames']);
+});
+
+test('updateProfile preserves aliases set on the profile', () => {
+  let p = { opponent: 'John', aliases: ['vkhss'], battles: [], totalBattles: 0, record: { win: 0, loss: 0, tie: 0 }, commonLeads: {}, switchIns: {}, moveUsage: {}, sets: {}, lowHpSwitches: 0, lowHpFaints: 0 };
+  const summary = summarizeBattle(parseLog(realLog), 'p1');
+  p = updateProfile(p, summary);
+  assert.equal(p.opponent, 'John');
+  assert.deepEqual(p.aliases, ['vkhss']);
+  assert.equal(p.totalBattles, 1);
+});
+
+test('loadProfiles normalizes aliases and re-keys old-format entries', async () => {
+  // Simulate old stored data: keyed by username, no aliases field.
+  await saveProfiles({
+    vkhss: {
+      opponent: 'John', // renamed display name, old key still points at it
+      battles: [],
+      totalBattles: 2,
+      record: { win: 1, loss: 1, tie: 0 },
+      commonLeads: {},
+      switchIns: {},
+      moveUsage: {},
+      sets: {},
+      lowHpSwitches: 0,
+      lowHpFaints: 0,
+    },
+  });
+  const loaded = await loadProfiles();
+  assert.ok(loaded.john, 'should be re-keyed to the display name');
+  assert.equal(loaded.john.opponent, 'John');
+  assert.deepEqual(loaded.john.aliases, []);
+  assert.equal(loaded.john.totalBattles, 2);
+  assert.equal(loaded.vkhss, undefined);
 });
 
 // ---------------------------------------------------------------------------

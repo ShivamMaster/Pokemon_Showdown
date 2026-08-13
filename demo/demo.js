@@ -2,6 +2,7 @@
 import { BattleReader } from '../src/reader/index.js';
 import { buildPanelModel, renderPanel } from '../src/ui/panel.js';
 import { recommend } from '../src/engine/index.js';
+import { topPotentialMoves } from '../src/engine/movepool.js';
 
 const textarea = document.getElementById('log-input');
 const container = document.getElementById('panel-container');
@@ -50,7 +51,11 @@ function render() {
   const ourSideId = sideSelect.value;
   const recState = snapshot ?? state;
   const recommendation = recommend(recState, { ourSideId });
-  const model = buildPanelModel(recState, { ourSideId, recommendation });
+  const model = buildPanelModel(recState, {
+    ourSideId,
+    recommendation,
+    getPotentialMoves: (species) => topPotentialMoves(species, 3, recState.gen ?? 9),
+  });
   container.innerHTML = renderPanel(model);
 
   const panel = container.querySelector('.psa-panel');

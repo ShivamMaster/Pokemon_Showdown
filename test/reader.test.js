@@ -393,8 +393,9 @@ test('request ingests our team: moves (ids → display), PP, items, tera, canTer
   assert.ok(dn, 'Dragonite should exist from the request');
   assert.deepEqual(dn.moves, ['Dragon Pulse', 'Fire Blast']);
   assert.deepEqual(dn.movePp['Dragon Pulse'], { cur: 15, max: 24 });
-  assert.equal(dn.item, 'leftovers');
+  assert.equal(dn.item, 'Leftovers'); // request ids are converted to display names
   assert.equal(dn.itemRevealed, true);
+  assert.equal(dn.ability, 'Multiscale');
   assert.equal(dn.teraType, 'Fire');
   assert.equal(dn.canTera, true); // from active.canTerastallize
   assert.equal(dn.hpPercent, 100);
@@ -402,6 +403,63 @@ test('request ingests our team: moves (ids → display), PP, items, tera, canTer
   assert.equal(rb.teraType, 'Grass');
   assert.equal(rb.canTera, null); // bench canTera stays unknown
   assert.deepEqual(rb.moves, ['Wood Hammer', 'Knock Off', 'U-turn', 'High Horsepower']);
+});
+
+test('applyRequest (parsed object) + switch ident merge: no duplicate records', () => {
+  const reader = new BattleReader();
+  reader.applyLine(`|gen|9`);
+  reader.applyLine(`|clearpoke`);
+  reader.applyLine(`|poke|p1|Raging Bolt|`);
+  reader.applyLine(`|poke|p1|Kingambit, F|`);
+  // The live client stores the parsed request on app.curRoom.request — callers
+  // hand that object straight to applyRequest(). Note the plain idents (`p1: X`).
+  reader.applyRequest({
+    active: [
+      { moves: [{ move: 'Dragon Pulse', id: 'dragonpulse', pp: 15, maxpp: 16 }], slot: 0 },
+    ],
+    side: {
+      name: 'Me',
+      id: 'p1',
+      pokemon: [
+        { ident: 'p1: Raging Bolt', details: 'Raging Bolt, M', condition: '100/100', active: true, moves: ['dragonpulse', 'thunderbolt'], baseAbility: 'protosynthesis', item: 'boosterenergy', teraType: 'Electric', canTera: true },
+        { ident: 'p1: Kingambit', details: 'Kingambit, F', condition: '100/100', active: false, moves: ['suckerpunch'], baseAbility: 'defiant', item: 'leftovers' },
+      ],
+    },
+  });
+  // The switch line uses the active-slot ident (`p1a: X`) — it must adopt the
+  // request-created record rather than duplicate it.
+  reader.applyLine(`|switch|p1a: Raging Bolt|Raging Bolt, M|100/100`);
+  const s = reader.state;
+  const our = s.sides.p1;
+  assert.equal(our.pokemon.length, 2, 'one record per species — no duplicates');
+  const rb = our.pokemon.find((m) => m.species === 'Raging Bolt');
+  assert.equal(rb.ident, 'p1a: Raging Bolt'); // adopted the slot ident
+  assert.deepEqual(rb.moves, ['Dragon Pulse', 'Thunderbolt']);
+  assert.deepEqual(rb.movePp['Dragon Pulse'], { cur: 15, max: 16 });
+  assert.equal(rb.ability, 'Protosynthesis');
+  assert.equal(rb.item, 'Booster Energy');
+  assert.equal(rb.teraType, 'Electric');
+  assert.equal(rb.canTera, true);
+  assert.equal(rb.active, true);
+  assert.equal(rb.hpPercent, 100);
+  const kg = our.pokemon.find((m) => m.species === 'Kingambit');
+  assert.deepEqual(kg.moves, ['Sucker Punch']);
+  assert.equal(kg.item, 'Leftovers');
+});
+
+test('applyRequest skips unknown items and leaves them unrevealed', () => {
+  const reader = new BattleReader();
+  reader.applyLine(`|gen|9`);
+  reader.applyRequest({
+    side: {
+      name: 'Me',
+      id: 'p1',
+      pokemon: [{ ident: 'p1: Rillaboom', details: 'Rillaboom, F', condition: '100/100', active: false, moves: [], item: 'unknown' }],
+    },
+  });
+  const rill = reader.state.sides.p1.pokemon.find((m) => m.species === 'Rillaboom');
+  assert.equal(rill.item, null);
+  assert.equal(rill.itemRevealed, false);
 });
 
 test('applyObservation merges hover tooltip info into a Pokémon', () => {

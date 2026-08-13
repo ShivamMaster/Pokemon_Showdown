@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { profileRows, renderOptionsHtml } from '../src/options/options.js';
-import { updateProfile } from '../src/profiles/index.js';
+import { updateProfile, addProfileAlias } from '../src/profiles/index.js';
 
 // A couple of learned profiles to render.
 const profileOf = (opponent, battles, wins, lead, lowHpSwitches, lowHpFaints) => {
@@ -46,6 +46,14 @@ test('profileRows: rows carry display projections and the storage key', () => {
   assert.equal(vkhss.recordText, '2-1');
   assert.deepEqual(vkhss.commonLead, { species: 'Great Tusk', pct: 100 });
   assert.equal(vkhss.lowHpSwitchRate, 25); // 1 switch of 4 low-HP situations
+  assert.deepEqual(vkhss.aliases, []);
+});
+
+test('profileRows: aliases are carried into the rows', () => {
+  const withAlias = { john: addProfileAlias(profileOf('John', 1, 1, 'Great Tusk', 0, 0), 'vkhss') };
+  const rows = profileRows(withAlias);
+  assert.equal(rows[0].key, 'john');
+  assert.deepEqual(rows[0].aliases, ['vkhss']);
 });
 
 test('profileRows: ignores malformed entries without a name', () => {
@@ -73,7 +81,7 @@ test('renderOptionsHtml: defaults are applied for missing settings', () => {
 
 test('renderOptionsHtml: renders a row per profile with its learned facts', () => {
   const html = renderOptionsHtml(profiles, {});
-  assert.ok(html.includes('>vkhss<'));
+  assert.ok(html.includes('value="vkhss"'));
   assert.ok(html.includes('3 battles'));
   assert.ok(html.includes('record 2-1'));
   assert.ok(html.includes('lead Great Tusk 100%'));
@@ -81,6 +89,28 @@ test('renderOptionsHtml: renders a row per profile with its learned facts', () =
   assert.ok(html.includes('data-delete="vkhss"'));
   assert.ok(html.includes('data-delete="alice"'));
   assert.ok(html.includes('class="psa-clear-all"'));
+});
+
+test('renderOptionsHtml: rename inputs and alias controls are wired per profile', () => {
+  const withAlias = {
+    john: addProfileAlias(profileOf('John', 2, 2, 'Great Tusk', 0, 0), 'Vkhss'),
+  };
+  const html = renderOptionsHtml(withAlias, {});
+  // Rename input carries the profile key.
+  assert.match(html, /class="psa-row-name" value="John" data-opp-key="john"/);
+  // Alias chip + remove button + add form all carry the profile key.
+  assert.ok(html.includes('class="psa-alias"'));
+  assert.ok(html.includes('>vkhss<'));
+  assert.match(html, /data-remove-alias="john\|vkhss"/);
+  assert.match(html, /class="psa-alias-add" data-opp-key="john"/);
+  assert.ok(html.includes('aria-label="Add username"'));
+});
+
+test('renderOptionsHtml: aliases are HTML-escaped', () => {
+  const withEvil = { john: addProfileAlias(profileOf('John', 1, 1, 'Great Tusk', 0, 0), '<img src=x>') };
+  const html = renderOptionsHtml(withEvil, {});
+  assert.ok(!html.includes('<img src=x>'));
+  assert.ok(html.includes('&lt;img src=x&gt;'));
 });
 
 test('renderOptionsHtml: empty state when no profiles exist', () => {

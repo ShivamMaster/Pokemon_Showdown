@@ -79,6 +79,10 @@ export function buildField(state) {
 // or move), so callers can skip those moves gracefully.
 export function damagePercent(gen, atkMon, defMon, moveName, field, opts = {}) {
   const statAssumption = opts.statAssumption ?? 'max';
+  // Missing mons (e.g. an opponent not revealed yet at team preview) can't be
+  // calculated — return null so callers skip them instead of crashing the
+  // whole recommendation render.
+  if (!atkMon?.species || !defMon?.species) return null;
   let move;
   try {
     move = new Move(gen, moveName);
@@ -87,8 +91,15 @@ export function damagePercent(gen, atkMon, defMon, moveName, field, opts = {}) {
   }
   const atkEvs = move.category === 'Physical' ? { atk: 252 } : { spa: 252 };
   const defEvs = move.category === 'Physical' ? { hp: 252, def: 252 } : { hp: 252, spd: 252 };
-  const attacker = buildPokemon(gen, atkMon, statAssumption === 'base' ? {} : atkEvs, opts.attackerTera ?? null);
-  const defender = buildPokemon(gen, defMon, statAssumption === 'base' ? {} : defEvs, opts.defenderTera ?? null);
+  let attacker;
+  let defender;
+  try {
+    attacker = buildPokemon(gen, atkMon, statAssumption === 'base' ? {} : atkEvs, opts.attackerTera ?? null);
+    defender = buildPokemon(gen, defMon, statAssumption === 'base' ? {} : defEvs, opts.defenderTera ?? null);
+  } catch {
+    // Unknown species the calc can't build — skip this matchup.
+    return null;
+  }
   let result;
   try {
     result = calculate(gen, attacker, defender, move, field);

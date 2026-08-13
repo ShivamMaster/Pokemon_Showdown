@@ -15,6 +15,8 @@
 import { BattleReader } from '../reader/index.js';
 import { buildPanelModel, renderPanel } from '../ui/panel.js';
 import { recommend } from '../engine/index.js';
+import { topPotentialMoves } from '../engine/movepool.js';
+import { createCapture } from './capture.js';
 import {
   summarizeBattle,
   updateProfile,
@@ -22,15 +24,23 @@ import {
   profileForDisplay,
   loadProfiles,
   saveProfiles,
+  findProfileKey,
+  toProfileKey,
+  emptyProfile,
 } from '../profiles/index.js';
 import { loadSettings, normalizeSettings, onStorageChanged } from '../settings.js';
-import { createBattleSource } from './source.js';
+import { createBattleSource, getBattle } from './source.js';
 import { ensureOverlay, ensureReopenButton, mountPanel, hidePanel, showPanel } from './overlay.js';
-import { createTooltipObserver, resolveMon } from './tooltips.js';
+import { createTooltipObserver, resolveMon, parseTooltipText } from './tooltips.js';
+import { ocrCanvas } from './ocr.js';
 
 const source = createBattleSource();
 const reader = new BattleReader();
 const overlay = ensureOverlay();
+const capture = createCapture();
+capture.setOnUpdate(() => {
+  if (capture.isCapturing()) render();
+});
 const POLL_MS = 600;
 const RENDER_THROTTLE_MS = 400;
 
@@ -38,7 +48,13 @@ let lastRenderAt = 0;
 let mounted = false;
 let linesSeen = 0;
 let battleEnded = false;
-let observedCount = 0;
+let observedCount = 0; // tooltips read that added NEW info
+let seenCount = 0;      // every tooltip hover we visually acknowledged
+let ocrCount = 0;       // tooltips recovered via pixel OCR
+let lastReadSpecies = null;
+let ocrBusy = false;    // serialize OCR jobs (tesseract is slow; drop overlaps)
+let flashTimer = null;
+let lastBadgeState = null; // 'battle' | 'idle' — only reported to the worker on change
 
 const profiles = {}; // keyed by lowercased opponent name
 let currentOpponentKey = null;
@@ -69,9 +85,11 @@ function theirSideId() {
 }
 
 function refreshOpponent() {
+  // Resolve the opponent through their profile's aliases, so a friend's
+  // alternate usernames all share one profile.
   const name = reader.state.sides[theirSideId()]?.playerName ?? null;
   if (!name) return;
-  const key = name.toLowerCase();
+  const key = findProfileKey(profiles, name) ?? toProfileKey(name);
   if (key !== currentOpponentKey) {
     currentOpponentKey = key;
     currentProfile = profiles[key] ?? null;
@@ -81,10 +99,17 @@ function refreshOpponent() {
 async function recordBattle() {
   const name = reader.state.sides[theirSideId()]?.playerName;
   if (!name) return;
-  const key = name.toLowerCase();
+  let key = findProfileKey(profiles, name);
+  let profile = key ? profiles[key] : null;
+  if (!profile) {
+    key = toProfileKey(name);
+    profile = emptyProfile(name);
+  }
   const summary = summarizeBattle(reader.state, source.ourSideId());
-  currentProfile = updateProfile(currentProfile, summary);
-  profiles[key] = currentProfile;
+  profile = updateProfile(profile, summary);
+  profiles[key] = profile;
+  currentProfile = profile;
+  currentOpponentKey = key;
   try {
     await saveProfiles(profiles);
   } catch {
@@ -109,12 +134,16 @@ function render(force = false) {
     ourSideId,
     recommendation,
     profile: profileForDisplay(currentProfile),
+    watching: { count: seenCount, last: lastReadSpecies, ocrCount },
+    capture: capture.getStats(),
+    getPotentialMoves: (species) => topPotentialMoves(species, 3, state.gen ?? 9),
   });
   mountPanel(renderPanel(model));
   overlay.dataset.psaTurn = String(state.turn);
   overlay.dataset.psaLines = String(linesSeen);
   overlay.dataset.psaRendered = 'true';
   overlay.dataset.psaOpponent = currentProfile?.opponent ?? '';
+  overlay.dataset.psaCapturing = String(capture.isCapturing());
   mounted = true;
 }
 
@@ -131,7 +160,14 @@ function tick() {
         }
       });
     }
-    const { lines, reset } = source.poll();
+    const { lines, reset, battleId, request, requestChanged } = source.poll();
+    // Keep the toolbar LIVE badge in sync: visible Chrome-level indicator
+    // that the assistant is watching a battle.
+    const badgeState = battleId ? 'battle' : 'idle';
+    if (badgeState !== lastBadgeState) {
+      lastBadgeState = badgeState;
+      window.postMessage({ psa: 'psa-badge-req', state: badgeState }, '*');
+    }
     if (reset) {
       reader.reset();
       linesSeen = 0;
@@ -141,11 +177,21 @@ function tick() {
         applyPanelVisibility();
       });
     }
+    let didRender = false;
     if (lines.length) {
       for (const line of lines) {
         reader.applyLine(line);
         linesSeen += 1;
       }
+      didRender = true;
+    }
+    // Live-only: the client intercepts `|request|` so it never lands in the
+    // log — apply the parsed request directly (moves, items, PP, HP, tera).
+    if (requestChanged && request) {
+      reader.applyRequest(request);
+      didRender = true;
+    }
+    if (didRender) {
       render();
     } else if (!mounted) {
       render(); // mount the panel up front with the waiting state
@@ -164,23 +210,118 @@ ensureReopenButton();
 setInterval(tick, POLL_MS);
 tick();
 
+// Real screen capture: the popup (user gesture) obtains the tab's capture
+// stream id, the worker + isolated-world bridge relay it here, and we start
+// the stream — Chrome then shows its screen-sharing indicator and the panel
+// reports live frame stats.
+window.addEventListener('message', async (ev) => {
+  if (ev.source !== window) return;
+  if (ev.data?.psa === 'psa-capture-start') {
+    try {
+      await capture.start(ev.data.streamId);
+      render(true);
+    } catch (err) {
+      overlay.dataset.psaError = String(err?.stack ?? err);
+    }
+  } else if (ev.data?.psa === 'psa-capture-stop') {
+    capture.stop();
+    render(true);
+  }
+});
+
+// Flash the panel so every hover gives instant, visible feedback that the
+// assistant is watching — even when the tooltip adds nothing new.
+function acknowledgeHover(obs) {
+  const panel = overlay.querySelector('.psa-panel');
+  if (!panel) return;
+  panel.classList.add('psa-flash');
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => panel.classList.remove('psa-flash'), 700);
+  overlay.dataset.psaHover = String(++seenCount);
+  if (obs?.species) lastReadSpecies = obs.species;
+  render(true);
+}
+
+// Merge an observation into the battle state (shared by the DOM and OCR
+// paths) and report whether anything new was learned.
+function mergeObservation(obs) {
+  const mon = resolveMon(reader.state, obs);
+  if (!mon) return false;
+  const changes = reader.applyObservation(mon, obs);
+  if (changes) {
+    observedCount += 1;
+    overlay.dataset.psaObserved = String(observedCount);
+    render(true);
+  }
+  return !!changes;
+}
+
 // Watch the user's hover tooltips: whatever the player inspects on screen
 // (their own sets at team preview, or either side's revealed info mid-battle)
 // gets merged into the battle state and the panel. Failures here are
 // non-fatal — the log-based pipeline keeps working regardless.
 createTooltipObserver({
-  onObservation: (obs) => {
+  // Instant feedback on every hover — the panel flashes and the status row
+  // shows what the assistant is reading.
+  onTooltipSeen: (obs) => {
     try {
-      const mon = resolveMon(reader.state, obs);
-      if (!mon) return;
-      const changes = reader.applyObservation(mon, obs);
-      if (changes) {
-        observedCount += 1;
-        overlay.dataset.psaObserved = String(observedCount);
-        render(true);
-      }
+      // Only acknowledge Pokémon tooltips, not move/ability ones.
+      if (!obs.species || (!obs.moves.length && !obs.ability && !obs.item && !obs.hpText)) return;
+      acknowledgeHover(obs);
     } catch (err) {
       overlay.dataset.psaError = String(err?.stack ?? err);
     }
+  },
+  // Merge NEW information into the battle state.
+  onObservation: (obs) => {
+    try {
+      mergeObservation(obs);
+    } catch (err) {
+      overlay.dataset.psaError = String(err?.stack ?? err);
+    }
+  },
+
+  // OCR fallback: the client rendered NO tooltip DOM for this hover (a
+  // canvas-rendered tooltip, a client change, or a slow render). If the tab
+  // capture is live, grab the pixels around the cursor, OCR them, and feed
+  // the recognized text through the same observation pipeline.
+  onHoverNoTooltip: (info) => {
+    // Only meaningful while we have real frames to read.
+    if (!capture.isCapturing() || ocrBusy) return;
+    // The client draws the tooltip near the hovered icon (usually above-left
+    // of it), so sample that area from the live video. Keep the box tooltip-
+    // sized so it doesn't sweep in unrelated on-screen text.
+    const rect = info.rect ?? { x: 0, y: 0, w: 40, h: 30 };
+    const region = capture.grabRegion({
+      x: rect.x - 40,
+      y: rect.y - 250,
+      w: rect.w + 340,
+      h: 240,
+      scale: 2,
+    });
+    if (!region) return;
+    ocrBusy = true;
+    overlay.dataset.psaOcr = String(++ocrCount); // count every OCR attempt
+    ocrCanvas(region)
+      .then((text) => {
+        if (!text) return;
+        const obs = parseTooltipText(text);
+        if (!obs.species) return;
+        // Attach the hovered side/slot so the species resolves even when both
+        // teams have the same Pokémon (Raging Bolt appears on both here).
+        const battle = getBattle();
+        const side = battle?.sides?.[info.sideIndex] ?? null;
+        const sidePokemon = side?.pokemon?.[info.slotIndex] ?? null;
+        // The reader keys sides by 'p1'/'p2' (side.sideid), not the username.
+        obs.sideId = side?.sideid ?? side?.id ?? null;
+        obs.slotIndex = info.slotIndex ?? null;
+        obs.slotSpecies = sidePokemon?.species ?? null;
+        acknowledgeHover(obs);
+        mergeObservation(obs);
+      })
+      .catch(() => {})
+      .finally(() => {
+        ocrBusy = false;
+      });
   },
 });

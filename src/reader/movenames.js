@@ -7,7 +7,7 @@
 // request handler converts at ingestion using @smogon/calc's per-gen move
 // table (already bundled with the engine).
 
-import { MOVES } from '@smogon/calc';
+import { MOVES, ABILITIES, ITEMS } from '@smogon/calc';
 
 const idToName = new Map(); // String(gen) -> Map(id -> display name)
 
@@ -29,4 +29,29 @@ export function displayMoveName(gen, name) {
   if (MOVES[gen]?.[name]) return name; // already a display name
   const map = idToNameMap(gen);
   return map.get(name.toLowerCase().replace(/[^a-z0-9]+/g, '')) ?? name;
+}
+
+// The live |request| sends abilities as lowercase ids ('protosynthesis'); the
+// log/tooltips use display names ('Protosynthesis'). The damage calc matches
+// display names, so convert ids at ingestion.
+export function displayAbilityName(gen, name) {
+  if (!name || typeof name !== 'string') return name;
+  const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const list = ABILITIES[String(gen)] ?? ABILITIES[String(gen ?? 9)];
+  if (!list) return name;
+  for (const display of list) {
+    if (display.toLowerCase().replace(/[^a-z0-9]+/g, '') === id) return display;
+  }
+  return name;
+}
+
+export function displayItemName(gen, name) {
+  if (!name || typeof name !== 'string') return name;
+  const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const list = ITEMS[String(gen)] ?? ITEMS[String(gen ?? 9)];
+  if (!list) return name;
+  for (const display of list) {
+    if (display.toLowerCase().replace(/[^a-z0-9]+/g, '') === id) return display;
+  }
+  return name;
 }

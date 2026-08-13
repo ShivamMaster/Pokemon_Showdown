@@ -76,6 +76,67 @@
   padding: 12px 4px;
 }
 
+/* Screen-watching status */
+.psa-watch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--psa-muted);
+  font-size: 11px;
+  background: #18202b;
+  border: 1px solid var(--psa-border);
+  border-radius: 6px;
+  padding: 4px 9px;
+  margin-bottom: 8px;
+}
+
+.psa-watch-live {
+  border-color: rgba(34, 197, 94, 0.55);
+  background: #14241c;
+}
+
+.psa-watch-live .psa-watch-icon {
+  color: #22c55e;
+  animation: psa-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes psa-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.psa-watch-icon {
+  font-size: 12px;
+}
+
+.psa-watch-text {
+  line-height: 1.3;
+}
+
+/* Flash when a hover tooltip is read */
+.psa-panel.psa-flash {
+  animation: psa-flash 0.6s ease-out;
+}
+
+@keyframes psa-flash {
+  0% {
+    box-shadow: 0 0 0 2px var(--psa-accent), 0 0 14px rgba(89, 205, 255, 0.55);
+  }
+  100% {
+    box-shadow: none;
+  }
+}
+
+.psa-tag-observed {
+  background: #3b3350;
+  color: #c9b8ff;
+}
+
 /* Recommendations strip */
 .psa-rec {
   background: #1c2029;
@@ -170,6 +231,22 @@
   margin-top: 6px;
 }
 
+/* Pokémon slot grid — six boxes per side */
+.psa-slot-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.psa-slot-grid .psa-card {
+  margin-bottom: 0;
+}
+
+.psa-slot-empty {
+  border-style: dashed;
+  opacity: 0.7;
+}
+
 /* Pokémon cards */
 .psa-card {
   background: #20242e;
@@ -177,6 +254,13 @@
   border-radius: 8px;
   padding: 7px 9px;
   margin-bottom: 6px;
+}
+
+.psa-potential {
+  font-size: 11px;
+  color: var(--psa-warn);
+  margin-top: 3px;
+  word-break: break-word;
 }
 
 .psa-card.psa-active {

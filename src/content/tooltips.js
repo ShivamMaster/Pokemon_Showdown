@@ -13,16 +13,20 @@
 import { getBattle } from './source.js';
 
 // Pure text parser — the tooltip's rendered text is stable across the
-// client's markup, so this is what unit tests exercise.
+// client's markup, so this is what unit tests exercise. Also tolerates the
+// noisy output of pixel OCR (stray battle-scene text above the tooltip): the
+// species is the first line that looks like a Pokémon name (letters/space/
+// .-'), not necessarily the very first line.
+const NAME_LIKE = /^[A-Za-z][A-Za-z .'’-]+$/;
 export function parseTooltipText(text) {
   const lines = String(text ?? '')
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean);
   const obs = { moves: [] };
-  lines.forEach((line, i) => {
-    if (line.startsWith('•')) {
-      const m = /^•\s*(.+?)(?:\s*\((\d+)\/(\d+)\))?\s*$/.exec(line);
+  for (const line of lines) {
+    if (line.startsWith('•') || line.startsWith('*') || line.startsWith('«')) {
+      const m = /^[•*«]\s*(.+?)(?:\s*\((\d+)\/(\d+)\))?\s*$/.exec(line);
       if (m) {
         obs.moves.push({
           name: m[1],
@@ -30,7 +34,7 @@ export function parseTooltipText(text) {
           maxpp: m[3] != null ? parseInt(m[3], 10) : null,
         });
       }
-      return;
+      continue;
     }
     const label = /^([A-Za-z][A-Za-z ]*):\s*(.*)$/.exec(line);
     if (label) {
@@ -53,11 +57,13 @@ export function parseTooltipText(text) {
       } else {
         (obs.labels ??= {})[key] = value;
       }
-      return;
+      continue;
     }
-    // First plain line is the species name.
-    if (i === 0 && !obs.species) obs.species = line;
-  });
+    // A name-like plain line is the species. OCR may include stray scene
+    // text above the tooltip, so prefer a line that actually looks like a
+    // Pokémon name (no parentheses / digits / colons).
+    if (!obs.species && NAME_LIKE.test(line)) obs.species = line;
+  }
   return obs;
 }
 
@@ -91,15 +97,31 @@ export function resolveMon(state, obs = {}) {
   return null;
 }
 
-// Watches for tooltips appearing on screen and reports observations.
-// `onObservation(obs)` receives the parsed tooltip plus { sideId, slotIndex,
-// slotSpecies, clientIdent } resolved from the hovered element.
-export function createTooltipObserver({ getBattleFn = getBattle, onObservation, dedupeMs = 1500 } = {}) {
+// Watches for tooltips appearing on screen.
+//
+// `onTooltipSeen(obs)` fires on *every* tooltip that appears (one per hover,
+// no dedupe) so the UI can give instant visual feedback; `onObservation(obs)`
+// fires only when the tooltip carries NEW information (deduped), so the
+// reader isn't spammed with re-reads of the same hover.
+//
+// Both receive the parsed tooltip plus { sideId, slotIndex, slotSpecies,
+// clientIdent } resolved from the hovered element.
+export function createTooltipObserver({
+  getBattleFn = getBattle,
+  onObservation,
+  onTooltipSeen,
+  onHoverNoTooltip,
+  dedupeMs = 1500,
+  hoverWaitMs = 350,
+} = {}) {
   let hover = null;
   let lastFp = null;
+  let lastSeenFp = null;
   let lastAt = 0;
   let timer = null;
   let mo = null;
+  let missTimer = null;
+  let missCheckedAt = 0;
 
   const onMove = (ev) => {
     const target = ev.target;
@@ -109,26 +131,57 @@ export function createTooltipObserver({ getBattleFn = getBattle, onObservation, 
     if (parts.length >= 3) {
       hover = { sideIndex: parseInt(parts[1], 10), slotIndex: parseInt(parts[2], 10) };
     }
+    // A hover happened: if no DOM tooltip materializes shortly, report it so
+    // the caller can fall back to pixel OCR of the captured frame. The client
+    // positions the tooltip near the hovered element (usually above-left), so
+    // pass the element's rect — that's where the pixels will be.
+    clearTimeout(missTimer);
+    missTimer = setTimeout(() => {
+      const tip = document.querySelector('.tooltip.tooltip-pokemon');
+      if (tip && tip.offsetParent !== null) return; // tooltip appeared — DOM path handles it
+      if (Date.now() - missCheckedAt < 400) return; // already reported this miss
+      missCheckedAt = Date.now();
+      const r = el.getBoundingClientRect();
+      onHoverNoTooltip?.({
+        sideIndex: hover?.sideIndex ?? null,
+        slotIndex: hover?.slotIndex ?? null,
+        rect: { x: r.x, y: r.y, w: r.width, h: r.height },
+      });
+    }, hoverWaitMs);
   };
 
-  const process = () => {
-    const tip = document.querySelector('.tooltip.tooltip-pokemon');
-    if (!tip) return;
-    const obs = parseTooltip(tip);
-    const fp = JSON.stringify(obs);
-    const now = Date.now();
-    if (fp === lastFp && now - lastAt < dedupeMs) return;
-    lastFp = fp;
-    lastAt = now;
+  const resolve = (obs) => {
     const battle = getBattleFn();
     const sidePokemon = battle?.sides?.[hover?.sideIndex]?.pokemon?.[hover?.slotIndex] ?? null;
-    onObservation?.({
+    return {
       ...obs,
       sideId: battle?.sides?.[hover?.sideIndex]?.id ?? null,
       slotIndex: hover?.slotIndex ?? null,
       slotSpecies: sidePokemon?.species ?? null,
       clientIdent: sidePokemon?.ident ?? null,
-    });
+    };
+  };
+
+  const process = () => {
+    const tip = document.querySelector('.tooltip.tooltip-pokemon');
+    if (!tip || tip.offsetParent === null) {
+      lastSeenFp = null; // tooltip gone — the next hover is a fresh appearance
+      return;
+    }
+    clearTimeout(missTimer); // the DOM tooltip arrived — the OCR fallback isn't needed
+    const obs = parseTooltip(tip);
+    const fp = JSON.stringify(obs);
+    const now = Date.now();
+    // One "seen" report per hover, even when the content is identical.
+    if (fp !== lastSeenFp) {
+      lastSeenFp = fp;
+      onTooltipSeen?.(resolve(obs));
+    }
+    // "New information" reports are deduped.
+    if (fp === lastFp && now - lastAt < dedupeMs) return;
+    lastFp = fp;
+    lastAt = now;
+    onObservation?.(resolve(obs));
   };
 
   const schedule = () => {

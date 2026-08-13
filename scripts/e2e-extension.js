@@ -62,7 +62,21 @@ const stripReady = (battles) => {
   return text.includes('vs vkhss') && text.includes(`${battles} battle`) && text.includes('record');
 };
 
-// Write settings from the page's main world through the isolated-world bridge.
+// Write a storage value from the page's main world through the isolated-world
+// bridge (same protocol the content script uses). Serialized into the page by
+// puppeteer, so each helper is fully self-contained (no closure references).
+const setStorage = (key, value) =>
+  new Promise((resolve, reject) => {
+    const id = 'e2e-' + Math.random().toString(36).slice(2);
+    const onMsg = (ev) => {
+      if (ev.source !== window || ev.data?.psa !== 'psa-storage-res' || ev.data.id !== id) return;
+      window.removeEventListener('message', onMsg);
+      if (ev.data.ok) resolve();
+      else reject(new Error(ev.data.error ?? 'bridge error'));
+    };
+    window.addEventListener('message', onMsg);
+    window.postMessage({ psa: 'psa-storage-req', id, op: 'set', key, value }, '*');
+  });
 const setSettings = (settings) =>
   new Promise((resolve, reject) => {
     const id = 'e2e-' + Math.random().toString(36).slice(2);
@@ -112,8 +126,35 @@ try {
     });
   });
 
+  // 1a. While a battle is being watched, the toolbar icon carries a LIVE
+  // badge (set by the service worker from the content script's report).
+  await step('badge', async () => {
+    let extId = null;
+    for (let i = 0; i < 20 && !extId; i++) {
+      const sw = (await browser.targets()).find((t) => t.type() === 'service_worker');
+      if (sw) extId = new URL(sw.url()).host;
+      else await sleep(250);
+    }
+    if (!extId) throw new Error('no service worker target found');
+    const sw = (await browser.targets()).find((t) => t.type() === 'service_worker');
+    await page.waitForFunction(
+      () => document.getElementById('psa-overlay')?.dataset.psaTurn != null,
+      { timeout: 30000 }
+    );
+    const client = await sw.createCDPSession();
+    const { result } = await client.send('Runtime.evaluate', {
+      expression: 'chrome.action.getBadgeText({})',
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    const badge = result?.value ?? '';
+    results.badge = badge;
+    if (badge !== 'LIVE') throw new Error(`badge should be LIVE while watching, got "${badge}"`);
+  });
+
   // 1b. Hovering a Pokémon on screen shows its tooltip, which the assistant
-  // reads: the hovered mon (Raging Bolt) gains PP on its revealed moves.
+  // reads: the hovered mon (Raging Bolt) gains PP on its revealed moves, and
+  // the panel gives instant visual feedback (flash + counter) on EVERY hover.
   await step('hoverTooltip', async () => {
     const sel = '.battle .teamicons .picon.has-tooltip';
     await page.waitForSelector(sel, { timeout: 15000 });
@@ -122,17 +163,42 @@ try {
       () => {
         const overlay = document.getElementById('psa-overlay');
         const text = overlay?.innerText ?? '';
-        return Number(overlay?.dataset.psaObserved ?? 0) >= 1 && text.includes('Dragon Pulse (15/16)');
+        return (
+          Number(overlay?.dataset.psaObserved ?? 0) >= 1 &&
+          Number(overlay?.dataset.psaHover ?? 0) >= 1 &&
+          text.includes('Dragon Pulse (15/16)') &&
+          text.includes('watching your screen')
+        );
       },
       { timeout: 15000 }
     );
+    // Hover away, then hover the SAME icon again: the panel must still
+    // acknowledge the second hover (feedback fires every time, even when no
+    // new info is learned) — the reading counter goes 1 -> 2.
+    await page.mouse.move(0, 0);
+    await new Promise((r) => setTimeout(r, 400));
+    await page.hover(sel);
+    await page.waitForFunction(
+      () => Number(document.getElementById('psa-overlay')?.dataset.psaHover ?? 0) >= 2,
+      { timeout: 10000 }
+    );
+    const flashed = await page.evaluate(
+      () => document.querySelector('#psa-overlay .psa-panel')?.classList.contains('psa-flash')
+    );
     results.hoverTooltip = await page.evaluate(() => {
       const overlay = document.getElementById('psa-overlay');
+      const panel = overlay?.querySelector('.psa-panel');
       return {
         observed: overlay?.dataset.psaObserved,
+        hovers: overlay?.dataset.psaHover,
         hasPp: (overlay?.innerText ?? '').includes('Dragon Pulse (15/16)'),
+        hasWatchRow: (overlay?.innerText ?? '').includes('watching your screen'),
+        flashed: panel?.classList.contains('psa-flash'),
       };
     });
+    if (Number(results.hoverTooltip.hovers) < 2) {
+      throw new Error('hover feedback counter did not increment on the second hover');
+    }
   });
 
   // 2. Battle ends -> opponent profile recorded and persisted via the bridge.
@@ -164,10 +230,16 @@ try {
     const options = await browser.newPage();
     await options.goto(`chrome-extension://${extId}/options.html`, { waitUntil: 'domcontentloaded', timeout: 15000 });
     await options.waitForFunction(() => !!document.querySelector('.psa-row'), { timeout: 10000 });
-    const text = await options.evaluate(() => document.querySelector('#psa-root')?.innerText ?? '');
-    results.optionsSample = text.slice(0, 200);
-    if (!(text.includes('vkhss') && text.includes('2 battles') && text.includes('record 2-0'))) {
-      throw new Error('options page missing the learned profile');
+    const optionsState = await options.evaluate(() => {
+      const root = document.querySelector('#psa-root');
+      return {
+        text: root?.innerText ?? '',
+        names: [...root.querySelectorAll('.psa-row-name')].map((i) => i.value),
+      };
+    });
+    results.optionsSample = optionsState.text.slice(0, 200);
+    if (!(optionsState.names.includes('vkhss') && optionsState.text.includes('2 battles') && optionsState.text.includes('record 2-0'))) {
+      throw new Error(`options page missing the learned profile: ${JSON.stringify(optionsState)}`);
     }
     results.optionsHasProfile = true;
     await options.close();
@@ -196,6 +268,137 @@ try {
     await popup.close();
   });
 
+  // 4c. Real screen capture: trigger the extension's toolbar action (the
+  // invocation a real click would grant), click Start in the popup, and verify
+  // the tab stream is live (frames increment, panel reports capture, stop
+  // halts it). This is the "watching my screen" path — Chrome shows its
+  // recording indicator while this stream is active.
+  await step('capture', async () => {
+    const exts = await browser.extensions();
+    const ext = [...exts.values()][0];
+    if (!ext) throw new Error('no extension found for capture step');
+    await page.triggerExtensionAction(ext);
+
+    let popupTarget = null;
+    for (let i = 0; i < 15 && !popupTarget; i++) {
+      await sleep(400);
+      popupTarget = (await browser.targets()).find((t) => t.type() === 'page' && t.url().includes('popup.html'));
+    }
+    if (!popupTarget) throw new Error('popup did not open after triggering the action');
+    const capturePopup = await popupTarget.asPage();
+    await capturePopup.waitForSelector('#psa-start-capture', { timeout: 10000 });
+    await capturePopup.click('#psa-start-capture');
+
+    const readCapture = () =>
+      page.evaluate(() => {
+        const overlay = document.getElementById('psa-overlay');
+        const m = (overlay?.innerText ?? '').match(/(\d+) frames · (\d+) changes/);
+        return { capturing: overlay?.dataset.psaCapturing, frames: m ? +m[1] : 0 };
+      });
+
+    await page.waitForFunction(
+      () => document.getElementById('psa-overlay')?.dataset.psaCapturing === 'true',
+      { timeout: 15000 }
+    );
+    const s1 = await readCapture();
+    await sleep(2500);
+    const s2 = await readCapture();
+    if (!(s2.frames > s1.frames)) {
+      throw new Error(`capture frames not incrementing: ${JSON.stringify(s1)} -> ${JSON.stringify(s2)}`);
+    }
+    results.capture = { started: s1, later: s2 };
+
+    // Stop from the popup: the stream must actually halt.
+    await capturePopup.bringToFront();
+    await capturePopup.click('#psa-stop-capture');
+    await page.waitForFunction(
+      () => document.getElementById('psa-overlay')?.dataset.psaCapturing === 'false',
+      { timeout: 10000 }
+    );
+    results.captureStopped = true;
+  });
+
+  // 4d. OCR fallback: hover a Pokémon while the client renders NO tooltip DOM
+  // (simulated by hiding .tooltip and drawing the tooltip as a plain pixel
+  // element). The extension must grab the region from the capture video, run
+  // tesseract in the offscreen document, and merge the recognized PP into the
+  // panel. This is the pixel-OCR fallback for tooltips that never appear as
+  // DOM. (Slow: first OCR loads wasm + traineddata, ~5-15s.)
+  await step('ocrFallback', async () => {
+    // Restart capture (the capture step stopped it) so we have frames.
+    const exts = await browser.extensions();
+    const ext = [...exts.values()][0];
+    if (!ext) throw new Error('no extension found for ocr step');
+    await page.triggerExtensionAction(ext);
+    let popupTarget = null;
+    for (let i = 0; i < 15 && !popupTarget; i++) {
+      await sleep(400);
+      popupTarget = (await browser.targets()).find((t) => t.type() === 'page' && t.url().includes('popup.html'));
+    }
+    if (!popupTarget) throw new Error('popup did not open for ocr step');
+    const ocrPopup = await popupTarget.asPage();
+    await ocrPopup.waitForSelector('#psa-start-capture', { timeout: 10000 });
+    await ocrPopup.click('#psa-start-capture');
+    await page.waitForFunction(
+      () => document.getElementById('psa-overlay')?.dataset.psaCapturing === 'true',
+      { timeout: 15000 }
+    );
+
+    // Suppress the client's DOM tooltip entirely and draw the tooltip text as
+    // a plain fixed element (pixels on screen, never a .tooltip node) — the
+    // exact "tooltip rendered but not as DOM" case OCR exists for.
+    await page.evaluate(() => {
+      const style = document.createElement('style');
+      style.textContent = '.tooltip, .tooltipwrapper, #tooltipwrapper { display: none !important; }';
+      document.head.appendChild(style);
+      const icon = document.querySelector('.battle .teamicons .picon.has-tooltip');
+      const r = icon?.getBoundingClientRect();
+      if (!r) return;
+      const div = document.createElement('div');
+      div.id = 'psa-fake-tooltip';
+      div.style.cssText =
+        `position:fixed; left:${Math.max(0, r.x - 30)}px; top:${Math.max(0, r.y - 175)}px; ` +
+        'width:300px; background:#2a2f3a; color:#fff; font:13px/1.5 Verdana,sans-serif; ' +
+        'padding:10px; z-index:99999; border-radius:6px;';
+      div.innerHTML =
+        '<div style="font-weight:bold;font-size:15px">Raging Bolt</div>' +
+        '<div>Ability: Protosynthesis</div>' +
+        '<div>Item: Booster Energy</div>' +
+        '<div style="margin-top:4px">• Dragon Pulse (15/16)</div>' +
+        '<div>• Thunderbolt (15/16)</div>';
+      document.body.appendChild(div);
+    });
+    await sleep(600);
+
+    const sel = '.battle .teamicons .picon.has-tooltip';
+    await page.hover(sel);
+
+    await page.waitForFunction(
+      () =>
+        Number(document.getElementById('psa-overlay')?.dataset.psaOcr ?? 0) >= 1 &&
+        (Number(document.getElementById('psa-overlay')?.dataset.psaObserved ?? 0) >= 1 ||
+          Number(document.getElementById('psa-overlay')?.dataset.psaHover ?? 0) >= 1),
+      { timeout: 60000 }
+    );
+    await page.waitForFunction(
+      () => (document.getElementById('psa-overlay')?.innerText ?? '').includes('Dragon Pulse (15/16)'),
+      { timeout: 30000 }
+    );
+    results.ocrFallback = await page.evaluate(() => {
+      const ov = document.getElementById('psa-overlay');
+      const text = ov?.innerText ?? '';
+      return {
+        ocr: ov?.dataset.psaOcr,
+        observed: ov?.dataset.psaObserved,
+        hasDragonPulsePp: text.includes('Dragon Pulse (15/16)'),
+        hasThunderPp: text.includes('Thunderbolt (15/16)'),
+      };
+    });
+    if (!results.ocrFallback.hasDragonPulsePp) {
+      throw new Error(`OCR fallback did not surface PP: ${JSON.stringify(results.ocrFallback)}`);
+    }
+  });
+
   // 5. Live toggle: disable -> panel hides; re-enable -> panel returns.
   await step('toggleOff', async () => {
     await page.evaluate(setSettings, { panelEnabled: false, statAssumption: 'max' });
@@ -213,6 +416,57 @@ try {
       { timeout: 10000 }
     );
     results.toggleOn = true;
+  });
+
+  // 6. Friend aliases: seed a profile named "John" with "vkhss" as an alias;
+  // the next battle (replay re-records on load) must land in John's profile,
+  // not a fresh "vkhss" one.
+  await step('aliasProfile', async () => {
+    const friendProfile = {
+      opponent: 'John',
+      aliases: ['vkhss'],
+      battles: [],
+      totalBattles: 0,
+      record: { win: 0, loss: 0, tie: 0 },
+      commonLeads: {},
+      switchIns: {},
+      moveUsage: {},
+      sets: {},
+      lowHpSwitches: 0,
+      lowHpFaints: 0,
+    };
+    await page.evaluate(setStorage, 'profiles', { john: friendProfile });
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+    let aliasResult = { text: '', opp: '', turn: '', observed: '' };
+    try {
+      await page.waitForFunction(
+        () => {
+          const text = document.getElementById('psa-overlay')?.innerText ?? '';
+          return text.includes('vs John') && text.includes('1 battle');
+        },
+        { timeout: 45000 }
+      );
+    } catch (err) {
+      await new Promise((r) => setTimeout(r, 1500));
+      aliasResult = await page.evaluate(() => {
+        const ov = document.getElementById('psa-overlay');
+        return {
+          text: (ov?.innerText ?? '').slice(0, 220),
+          opp: ov?.dataset.psaOpponent,
+          turn: ov?.dataset.psaTurn,
+          observed: ov?.dataset.psaObserved,
+        };
+      });
+      throw new Error(`alias wait failed; state=${JSON.stringify(aliasResult)}`);
+    }
+    results.aliasProfile = await page.evaluate(() => {
+      const text = document.getElementById('psa-overlay')?.innerText ?? '';
+      return {
+        hasFriendName: text.includes('vs John'),
+        oneBattle: text.includes('1 battle'),
+        noRawUsername: !text.includes('vs vkhss'),
+      };
+    });
   });
 
   results.steps = steps;

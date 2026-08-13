@@ -138,6 +138,41 @@ test('engine: does not over-recommend switching when the matchup is won', () => 
   assert.equal(rec.bestMove.move, 'Stone Edge'); // 4x vs Charizard
 });
 
+test('damagePercent returns null for a missing defender (e.g. opponent not revealed yet)', () => {
+  const gen = 9;
+  const attacker = { species: 'Raging Bolt', moves: ['Dragon Pulse'], level: 100 };
+  // The crash this guards: buildPokemon(null) -> new Pokemon(gen, undefined)
+  // throws "Cannot read properties of undefined (reading 'hp')" inside the
+  // calc, which previously froze the whole panel at team preview.
+  assert.equal(damagePercent(gen, attacker, null, 'Dragon Pulse', new Field()), null);
+  assert.equal(damagePercent(gen, null, attacker, 'Dragon Pulse', new Field()), null);
+  assert.equal(damagePercent(gen, null, null, 'Dragon Pulse', new Field()), null);
+  // Unknown species is also skipped gracefully instead of throwing.
+  assert.equal(
+    damagePercent(gen, { species: 'Totally Fake Mon', moves: ['Tackle'] }, attacker, 'Tackle', new Field()),
+    null
+  );
+});
+
+test('engine: team preview (no actives on either side) shows waiting state, no crash', () => {
+  // A fresh live battle: our request has landed (team known) but neither side
+  // has been switched in yet. Previously recommend() crashed here because
+  // bestSwitchIn ran against a null target.
+  const state = makeState({
+    ourActive: null,
+    theirActive: null,
+    ourBench: [
+      { species: 'Raging Bolt', moves: ['Dragon Pulse', 'Thunderbolt'] },
+      { species: 'Kingambit', moves: ['Sucker Punch'] },
+      { species: 'Rillaboom', moves: ['Wood Hammer'] },
+    ],
+  });
+  const rec = recommend(state);
+  assert.equal(rec.bestMove, null);
+  assert.equal(rec.switchTo, null);
+  assert.ok(rec.reasoning.some((r) => r.includes('team preview') || r.includes('not started')));
+});
+
 test('engine: must send in a replacement when our active is down', () => {
   const state = makeState({
     ourActive: { species: 'Garchomp', fainted: true, moves: ['Earthquake'] },

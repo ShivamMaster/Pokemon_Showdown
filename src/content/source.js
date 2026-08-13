@@ -14,6 +14,25 @@ export function getBattle() {
   return app.curRoom?.battle ?? null;
 }
 
+// The live client intercepts `|request|` before it ever reaches the battle
+// log (`receiveRequest`), so the reader would never see our own team's
+// moves/items/PP. The client keeps the parsed request on the room object —
+// read it from there instead.
+export function getLiveRequest() {
+  const app = typeof window !== 'undefined' ? window.app : null;
+  if (!app) return null;
+  return app.curRoom?.request ?? null;
+}
+
+// The client tracks our side id ('p1'/'p2') on the room (`updateSideLocation`
+// sets it from the request's side.id) — more reliable than inferring it from
+// names in the log.
+export function ourSideIdFromRoom() {
+  const app = typeof window !== 'undefined' ? window.app : null;
+  const side = app?.curRoom?.side;
+  return side === 'p1' || side === 'p2' ? side : null;
+}
+
 export function getBattleId(battle) {
   return battle?.id ?? battle?.roomid ?? null;
 }
@@ -34,9 +53,10 @@ export function ourSideIdFromBattle(battle) {
   return 'p1';
 }
 
-export function createBattleSource({ getBattleFn = getBattle } = {}) {
+export function createBattleSource({ getBattleFn = getBattle, getRequestFn = getLiveRequest } = {}) {
   let seen = 0;
   let lastBattleId = null;
+  let lastRequestJson = null;
 
   return {
     // Returns new protocol lines since the last poll, the current battle id,
@@ -45,21 +65,30 @@ export function createBattleSource({ getBattleFn = getBattle } = {}) {
       const battle = getBattleFn();
       const battleId = getBattleId(battle);
       const reset = lastBattleId !== null && battleId !== null && battleId !== lastBattleId;
-      if (reset) seen = 0;
+      if (reset) {
+        seen = 0;
+        lastRequestJson = null;
+      }
       lastBattleId = battleId;
 
       if (!battle || !Array.isArray(battle.stepQueue)) {
-        return { lines: [], battleId, reset };
+        return { lines: [], battleId, reset, request: null, requestChanged: false };
       }
       const q = battle.stepQueue;
       if (q.length < seen) seen = 0; // queue was cleared/replaced
       const lines = q.slice(seen);
       seen = q.length;
-      return { lines, battleId, reset };
+
+      // The live request never appears in the log — surface it separately.
+      const request = getRequestFn();
+      const requestJson = request ? JSON.stringify(request) : null;
+      const requestChanged = requestJson !== null && requestJson !== lastRequestJson;
+      if (requestChanged) lastRequestJson = requestJson;
+      return { lines, battleId, reset, request, requestChanged };
     },
 
     ourSideId() {
-      return ourSideIdFromBattle(getBattleFn());
+      return ourSideIdFromRoom() ?? ourSideIdFromBattle(getBattleFn());
     },
   };
 }

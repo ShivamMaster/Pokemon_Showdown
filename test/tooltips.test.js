@@ -63,6 +63,31 @@ test('parseTooltipText returns a safe empty shape for junk input', () => {
   assert.deepEqual(parseTooltipText('   \n \n'), { moves: [] });
 });
 
+test('parseTooltipText tolerates noisy OCR output (stray scene text above the tooltip)', () => {
+  // Real OCR output from a captured frame: battle-scene text bleeds into the
+  // top of the crop, then the tooltip lines follow. The species must be the
+  // first name-like line, not the noise, and OCR bullet glyphs («, *) are
+  // accepted alongside •.
+  const obs = parseTooltipText(
+    `Grassy Terrain (4 or 7 turns)\nRaging Bolt\nAbility: Protosynthesis\nItem: Booster Energy\n« Dragon Pulse (15/16)\n* Thunderbolt (15/16)`
+  );
+  assert.equal(obs.species, 'Raging Bolt');
+  assert.equal(obs.ability, 'Protosynthesis');
+  assert.equal(obs.item, 'Booster Energy');
+  assert.deepEqual(obs.moves, [
+    { name: 'Dragon Pulse', pp: 15, maxpp: 16 },
+    { name: 'Thunderbolt', pp: 15, maxpp: 16 },
+  ]);
+});
+
+test('parseTooltipText ignores parenthesized/noise lines when picking the species', () => {
+  const obs = parseTooltipText(`Turn 22 (some banner)\nTogekiss\nAbility: Serene Grace`);
+  assert.equal(obs.species, 'Togekiss');
+  // A line with digits or colons never becomes the species.
+  const junk = parseTooltipText('2 , Tee\nTogekiss\nAbility: Serene Grace');
+  assert.equal(junk.species, 'Togekiss');
+});
+
 // ---------------------------------------------------------------------------
 // resolveMon
 // ---------------------------------------------------------------------------

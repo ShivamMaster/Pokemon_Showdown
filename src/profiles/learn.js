@@ -15,6 +15,58 @@
 
 const LOW_HP = 40;
 
+// Storage key for a profile: the display name, lowercased, stripped to
+// alphanumerics ('John' -> 'john', 'BaddyGames' -> 'baddygames').
+export function toProfileKey(name) {
+  return String(name ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '') || 'unknown';
+}
+
+// Does this username map to this profile? A profile matches its own display
+// name and every username in its `aliases` list.
+export function profileMatchesUsername(profile, username) {
+  const u = String(username ?? '').toLowerCase();
+  if (!u) return false;
+  if (toProfileKey(profile?.opponent) === u) return true;
+  return (profile?.aliases ?? []).includes(u);
+}
+
+// Find the storage key of the profile this username maps to (friend aliases
+// included), or null when the username has no profile yet.
+export function findProfileKey(profiles, username) {
+  const u = String(username ?? '').toLowerCase();
+  if (!u) return null;
+  for (const [key, p] of Object.entries(profiles ?? {})) {
+    if (profileMatchesUsername(p, u)) return key;
+  }
+  return null;
+}
+
+// Rename a profile (e.g. from a raw username to the friend's name). The old
+// name is kept as an alias so battles under it still map here.
+export function renameProfile(profile, newName) {
+  const clean = String(newName ?? '').trim();
+  if (!clean) return profile;
+  const oldKey = toProfileKey(profile?.opponent);
+  const alias = oldKey;
+  const aliases = [...(profile?.aliases ?? [])];
+  if (alias && !aliases.includes(alias)) aliases.push(alias);
+  return { ...profile, opponent: clean, aliases };
+}
+
+// Add a username (alternate account) to a profile. Stored lowercased.
+export function addProfileAlias(profile, username) {
+  const alias = String(username ?? '').trim().toLowerCase();
+  if (!alias || toProfileKey(profile?.opponent) === alias) return profile;
+  const aliases = [...(profile?.aliases ?? [])];
+  if (!aliases.includes(alias)) aliases.push(alias);
+  return { ...profile, aliases };
+}
+
+export function removeProfileAlias(profile, username) {
+  const alias = String(username ?? '').trim().toLowerCase();
+  return { ...profile, aliases: (profile?.aliases ?? []).filter((a) => a !== alias) };
+}
+
 function speciesOf(state, ident) {
   for (const side of [state.sides.p1, state.sides.p2]) {
     const mon = side.pokemon.find((m) => m.ident === ident);
@@ -92,10 +144,11 @@ export function summarizeBattle(state, ourSideId) {
   };
 }
 
-// Merge one battle summary into the running profile.
-export function updateProfile(profile, summary) {
-  const base = profile ?? {
-    opponent: summary.opponent,
+// A fresh, empty profile for a username.
+export function emptyProfile(username) {
+  return {
+    opponent: username,
+    aliases: [],
     battles: [],
     totalBattles: 0,
     record: { win: 0, loss: 0, tie: 0 },
@@ -106,6 +159,11 @@ export function updateProfile(profile, summary) {
     lowHpSwitches: 0,
     lowHpFaints: 0,
   };
+}
+
+// Merge one battle summary into the running profile.
+export function updateProfile(profile, summary) {
+  const base = profile ?? emptyProfile(summary.opponent);
 
   base.battles = [...(base.battles ?? []), summary].slice(-20);
   base.totalBattles += 1;
@@ -134,6 +192,18 @@ export function updateProfile(profile, summary) {
   base.lowHpSwitches += summary.lowHpSwitches ?? 0;
   base.lowHpFaints += summary.lowHpFaints ?? 0;
   return base;
+}
+
+// Turn a stored profile object into a normalized one (aliases as a lowercase
+// string array), so old data and hand-built test data keep working.
+export function normalizeProfile(profile) {
+  if (!profile || typeof profile !== 'object') return null;
+  return {
+    ...profile,
+    aliases: Array.isArray(profile.aliases)
+      ? profile.aliases.map((a) => String(a).toLowerCase())
+      : [],
+  };
 }
 
 const topEntries = (obj, n) => Object.entries(obj ?? {}).sort((a, b) => b[1] - a[1]).slice(0, n);

@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-import { createBattleSource, ourSideIdFromBattle } from '../src/content/source.js';
+import { createBattleSource, ourSideIdFromBattle, ourSideIdFromRoom } from '../src/content/source.js';
 import { parseLog } from '../src/reader/reader.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -72,6 +72,60 @@ test('ourSideIdFromBattle: detects p2 when we are the second player', () => {
     mySide: { id: 'vkhss' },
   };
   assert.equal(ourSideIdFromBattle(battle), 'p2');
+});
+
+test('source.poll: surfaces the live request when it changes (once)', () => {
+  let request = { side: { id: 'p1', name: 'Me', pokemon: [{ ident: 'p1: X', moves: ['tackle'] }] } };
+  let battle = { id: 'b1', stepQueue: ['|start'] };
+  const source = createBattleSource({
+    getBattleFn: () => battle,
+    getRequestFn: () => request,
+  });
+
+  const first = source.poll();
+  assert.equal(first.requestChanged, true, 'first sight of the request');
+  assert.equal(first.request, request);
+
+  const second = source.poll();
+  assert.equal(second.requestChanged, false, 'unchanged request is not re-applied');
+
+  request = { side: { id: 'p1', name: 'Me', pokemon: [{ ident: 'p1: X', moves: ['tackle', 'growl'] }] } };
+  const third = source.poll();
+  assert.equal(third.requestChanged, true, 'updated request is surfaced again');
+
+  // A new battle forgets the previous request fingerprint.
+  battle = { id: 'b2', stepQueue: ['|start'] };
+  request = { side: { id: 'p1', name: 'Me', pokemon: [{ ident: 'p1: X', moves: ['tackle'] }] } };
+  const poll = source.poll();
+  assert.equal(poll.reset, true);
+  assert.equal(poll.requestChanged, true);
+});
+
+test('source.poll: no live request -> requestChanged stays false', () => {
+  const source = createBattleSource({ getBattleFn: () => ({ id: 'b1', stepQueue: ['|start'] }) });
+  assert.equal(source.poll().request, null);
+  assert.equal(source.poll().requestChanged, false);
+});
+
+test('ourSideId: prefers the room side id over log inference', () => {
+  const battle = {
+    sides: [{ sideid: 'p1' }, { sideid: 'p2' }],
+    mySide: { id: 'vkhss' },
+  };
+  const source = createBattleSource({ getBattleFn: () => battle });
+  // Without a room, falls back to log inference.
+  assert.equal(source.ourSideId(), 'p1');
+});
+
+test('ourSideIdFromRoom: reads the client room side id', () => {
+  const original = globalThis.window;
+  globalThis.window = { app: { curRoom: { side: 'p2' } } };
+  try {
+    assert.equal(ourSideIdFromRoom(), 'p2');
+  } finally {
+    globalThis.window = original;
+  }
+  assert.equal(ourSideIdFromRoom(), null, 'no room -> null');
 });
 
 test('ourSideIdFromBattle: defaults to p1 when unknown', () => {

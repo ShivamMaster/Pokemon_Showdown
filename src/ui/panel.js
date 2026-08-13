@@ -38,41 +38,96 @@ export function buildPanelModel(state, opts = {}) {
 
   const empty = !(ourSide?.pokemon?.length || theirSide?.pokemon?.length);
 
-  const sideModel = (side) => {
-    const rosterIndex = new Map((side?.roster ?? []).map((r, i) => [r.ident, i]));
-    const team = (side?.pokemon ?? [])
-      .map((mon) => {
-        const boosts = Object.fromEntries(Object.entries(mon.boosts ?? {}).filter(([, v]) => v !== 0));
-        return {
-          ident: mon.ident,
-          species: mon.species,
-          nickname: mon.nickname,
-          active: !!mon.active,
-          fainted: !!mon.fainted,
-          hpPercent: mon.hpPercent ?? null,
-          status: mon.status ?? null,
-          item: mon.item ?? null,
-          itemKnown: !!mon.itemRevealed,
-          itemConsumed: !!mon.itemConsumed,
-          ability: mon.ability ?? null,
-          tera: mon.teraType ?? null,
-          teraActive: !!mon.terastallized,
-          canTera: mon.canTera ?? null,
-          moves: [...(mon.moves ?? [])],
-          movePp: { ...(mon.movePp ?? {}) },
-          hiddenCount: Math.max(0, 4 - (mon.moves?.length ?? 0)),
-          boosts,
-          switchCount: mon.switchCount ?? 0,
-        };
-      })
-      .sort((a, b) => {
-        if (a.active !== b.active) return a.active ? -1 : 1;
-        if (a.fainted !== b.fainted) return a.fainted ? 1 : -1;
-        return (rosterIndex.get(a.ident) ?? 99) - (rosterIndex.get(b.ident) ?? 99);
-      });
+  const getPotential = opts.getPotentialMoves ?? null;
+
+  const cardOf = (mon, showPotential) => {
+    const boosts = Object.fromEntries(Object.entries(mon.boosts ?? {}).filter(([, v]) => v !== 0));
+    const hidden = Math.max(0, 4 - (mon.moves?.length ?? 0));
+    return {
+      ident: mon.ident,
+      species: mon.species,
+      nickname: mon.nickname,
+      preview: !!mon.preview,
+      active: !!mon.active,
+      fainted: !!mon.fainted,
+      hpPercent: mon.hpPercent ?? null,
+      status: mon.status ?? null,
+      item: mon.item ?? null,
+      itemKnown: !!mon.itemRevealed,
+      itemConsumed: !!mon.itemConsumed,
+      ability: mon.ability ?? null,
+      tera: mon.teraType ?? null,
+      teraActive: !!mon.terastallized,
+      canTera: mon.canTera ?? null,
+      moves: [...(mon.moves ?? [])],
+      movePp: { ...(mon.movePp ?? {}) },
+      hiddenCount: hidden,
+      observed: !!mon.observed,
+      boosts,
+      switchCount: mon.switchCount ?? 0,
+      potential:
+        showPotential && hidden > 0 && getPotential ? (getPotential(mon.species) ?? []).slice(0, 3) : [],
+    };
+  };
+
+  // Team-preview card: we know the species (from |poke|) but nothing else yet.
+  const previewOf = (entry, showPotential) =>
+    cardOf(
+      {
+        ident: null,
+        species: entry.species,
+        nickname: null,
+        preview: true,
+        moves: [],
+        movePp: {},
+        item: null,
+        itemRevealed: false,
+        itemConsumed: false,
+        ability: null,
+        teraType: null,
+        terastallized: false,
+        canTera: null,
+        active: false,
+        fainted: false,
+        hpPercent: null,
+        status: null,
+        observed: false,
+        boosts: {},
+        switchCount: 0,
+      },
+      showPotential
+    );
+
+  // Six slots per side (or the team size): team-preview order for the
+  // opponent, request order for our team. Unknown slots stay as placeholders
+  // and fill in as Pokémon are revealed.
+  const sideModel = (side, { showPotential } = {}) => {
+    const roster = side?.roster ?? [];
+    const pokemon = side?.pokemon ?? [];
+    const order = roster.length ? roster.map((r) => r.species) : pokemon.map((p) => p.species);
+    const real = Math.max(order.length, pokemon.length);
+    const slotCount = real ? Math.max(side?.teamSize ?? 6, real) : 0;
+    const used = new Set();
+    const slots = [];
+    for (let i = 0; i < slotCount; i++) {
+      const wanted = order[i] ?? null;
+      let mon = wanted ? pokemon.find((p) => p.species === wanted && !used.has(p.ident)) : null;
+      if (!mon) mon = pokemon.find((p) => !used.has(p.ident)) ?? null;
+      if (mon) used.add(mon.ident);
+      if (mon) {
+        slots.push(cardOf(mon, showPotential));
+      } else if (roster[i]?.species) {
+        // Team preview: the species is known (|poke|) even though no battle
+        // record exists yet — show it instead of a blank slot.
+        slots.push(previewOf(roster[i], showPotential));
+      } else {
+        slots.push({ empty: true, slot: i + 1 });
+      }
+    }
     return {
       name: side?.playerName ?? null,
-      team,
+      slots,
+      team: slots.filter((s) => !s.empty),
       sideEffects: Object.entries(side?.effects ?? {})
         .map(([name, count]) => (count > 1 ? `${name} ×${count}` : name))
         .sort(),
@@ -114,10 +169,17 @@ export function buildPanelModel(state, opts = {}) {
       oppName: theirSide?.playerName ?? null,
     },
     field: fieldParts.join(' · '),
-    us: sideModel(ourSide),
-    them: sideModel(theirSide),
+    us: sideModel(ourSide, { showPotential: false }),
+    them: sideModel(theirSide, { showPotential: true }),
     recommendation: opts.recommendation ?? null,
     profile: opts.profile ?? null,
+    watching: { count: opts.watching?.count ?? 0, last: opts.watching?.last ?? null },
+    ocrCount: opts.watching?.ocrCount ?? 0,
+    capture: {
+      active: !!opts.capture?.active,
+      frames: opts.capture?.frames ?? 0,
+      changes: opts.capture?.changes ?? 0,
+    },
     recentActions: (state?.actions ?? [])
       .slice(-20)
       .reverse()
@@ -160,29 +222,41 @@ function renderCard(card) {
     ? escapeHtml(moveText) +
       (card.hiddenCount > 0 ? ` <span class="psa-hidden">(+${card.hiddenCount} hidden)</span>` : '')
     : '<span class="psa-muted">no moves revealed</span>';
+  const potentialHtml = card.potential?.length
+    ? `<div class="psa-potential">could have: ${escapeHtml(card.potential.join(' · '))}</div>`
+    : '';
 
-  return `<div class="psa-card${card.active ? ' psa-active' : ''}${card.fainted ? ' psa-fainted' : ''}" title="${escapeHtml(card.ident)}">
+  return `<div class="psa-card${card.active ? ' psa-active' : ''}${card.fainted ? ' psa-fainted' : ''}${card.preview ? ' psa-preview' : ''}" title="${escapeHtml(card.ident)}">
   <div class="psa-card-head">
     <span class="psa-species">${escapeHtml(card.species)}</span>
+    ${card.preview ? '<span class="psa-tag" title="Known from team preview — details appear as it is revealed">preview</span>' : ''}
     ${card.active ? '<span class="psa-tag psa-tag-active">on field</span>' : ''}
     ${card.fainted ? '<span class="psa-tag psa-tag-fainted">fainted</span>' : ''}
+    ${card.observed ? '<span class="psa-tag psa-tag-observed" title="Read from a hover tooltip">👁</span>' : ''}
     ${card.status ? `<span class="psa-status psa-status-${escapeHtml(card.status)}">${escapeHtml(STATUS_LABELS[card.status] ?? card.status)}</span>` : ''}
   </div>
   ${hpBar(card.hpPercent)}
   <div class="psa-card-hp">${card.hpPercent != null ? `${card.hpPercent}%` : '<span class="psa-muted">??</span>'}</div>
   <div class="psa-card-moves">${movesHtml}</div>
+  ${potentialHtml}
   <div class="psa-card-details">${escapeHtml(details)}</div>
   ${boostsText ? `<div class="psa-boosts">${escapeHtml(boostsText)}</div>` : ''}
 </div>`;
 }
 
+function renderEmptySlot(slot) {
+  return `<div class="psa-card psa-slot-empty" title="Not revealed yet">
+  <div class="psa-card-head"><span class="psa-species psa-muted">Slot ${slot}</span></div>
+  <div class="psa-card-hp psa-muted">?</div>
+  <div class="psa-card-moves psa-muted">not revealed yet</div>
+</div>`;
+}
+
 function renderSide(side, sideClass, label) {
-  const active = side.team.filter((m) => m.active).map(renderCard);
-  const bench = side.team.filter((m) => !m.active).map(renderCard);
+  const slots = side.slots.map((card) => (card.empty ? renderEmptySlot(card) : renderCard(card))).join('');
   return `<section class="psa-side ${sideClass}">
   <h3 class="psa-side-title">${label}${side.name ? ` <span class="psa-name">${escapeHtml(side.name)}</span>` : ''}</h3>
-  <div class="psa-active-zone">${active.join('') || '<div class="psa-muted">no active Pokémon</div>'}</div>
-  <div class="psa-bench">${bench.join('')}</div>
+  <div class="psa-slot-grid">${slots || '<div class="psa-muted">no team data yet</div>'}</div>
   ${side.sideEffects.length ? `<div class="psa-sideeffects">${side.sideEffects.map(escapeHtml).join(' · ')}</div>` : ''}
 </section>`;
 }
@@ -232,7 +306,20 @@ export function renderPanel(model) {
 </div>`
     : '';
 
+  const captureText = model.capture.active
+    ? `● capturing screen${model.capture.frames ? ` · ${model.capture.frames} frames · ${model.capture.changes} changes seen` : ''}`
+    : null;
+  const watchingHtml = `<div class="psa-watch${model.capture.active ? ' psa-watch-live' : ''}">
+  <span class="psa-watch-icon">${model.capture.active ? '●' : '👁'}</span>
+  <span class="psa-watch-text">
+    ${captureText ? `${captureText} — ` : 'watching your screen — '}${model.watching.count
+      ? `hover a Pokémon to read it · read ${model.watching.count} tooltip${model.watching.count === 1 ? '' : 's'}${model.ocrCount ? ` · ${model.ocrCount} via OCR` : ''}${model.watching.last ? ` · last: ${escapeHtml(model.watching.last)}` : ''}`
+      : 'hover a Pokémon to read it'}
+  </span>
+</div>`;
+
   const body = `
+  ${watchingHtml}
   ${recHtml}
   ${profileHtml}
   <div class="psa-field">${escapeHtml(model.field)}</div>

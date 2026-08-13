@@ -105,6 +105,20 @@ export function worstThreat(theirMon, target, gen, field, calcOpts = {}) {
   return best;
 }
 
+// A short, human-readable sample of what a species could be running — the top
+// `n` damaging moves by base power. Used by the panel to show "could have:"
+// on opponent slots whose full set isn't known yet.
+export function topPotentialMoves(species, n = 4, gen = 9) {
+  const moves = potentialMoves(species);
+  const moves9 = MOVES[String(gen)] ?? {};
+  return moves
+    .map((name) => ({ name, bp: moves9[name]?.bp ?? 0, category: moves9[name]?.category }))
+    .filter((m) => m.category !== 'Status' && m.bp > 0)
+    .sort((a, b) => b.bp - a.bp)
+    .slice(0, n)
+    .map((m) => m.name);
+}
+
 // Hidden-move threats against a whole team, sorted by damage, filtered to the
 // meaningful ones. Each entry: { target, move, pct, max, eff, type }.
 export function teamThreats(theirMon, ourTeam, gen, field, calcOpts = {}, opts = {}) {
