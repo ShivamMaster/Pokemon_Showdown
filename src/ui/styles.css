@@ -1,0 +1,358 @@
+/* src/ui/styles.css — Battle Assistant panel */
+
+.psa-panel {
+  --psa-bg: rgba(16, 18, 24, 0.94);
+  --psa-border: #3a3f4b;
+  --psa-text: #e8eaf0;
+  --psa-muted: #98a0ad;
+  --psa-accent: #4fc3f7;
+  --psa-danger: #ef5350;
+  --psa-warn: #ffca28;
+  --psa-ok: #66bb6a;
+  font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  background: var(--psa-bg);
+  color: var(--psa-text);
+  border: 1px solid var(--psa-border);
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.35;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.45);
+  min-width: 300px;
+  max-width: 400px;
+  overflow: hidden;
+}
+
+.psa-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #22262f;
+  border-bottom: 1px solid var(--psa-border);
+}
+
+.psa-title {
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.psa-meta {
+  color: var(--psa-muted);
+  font-size: 12px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.psa-collapse {
+  background: #2d323d;
+  color: var(--psa-text);
+  border: 1px solid var(--psa-border);
+  border-radius: 6px;
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.psa-collapse:hover {
+  background: #3a4150;
+}
+
+.psa-panel.psa-collapsed .psa-body {
+  display: none;
+}
+
+.psa-body {
+  padding: 10px 12px 12px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.psa-empty {
+  color: var(--psa-muted);
+  padding: 12px 4px;
+}
+
+/* Recommendations strip */
+.psa-rec {
+  background: #1c2029;
+  border: 1px solid var(--psa-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+
+.psa-rec-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.psa-rec-label {
+  color: var(--psa-muted);
+}
+
+.psa-rec-value {
+  color: var(--psa-accent);
+  font-size: 14px;
+}
+
+.psa-rec-note {
+  color: var(--psa-muted);
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.psa-rec-note.psa-winner {
+  color: var(--psa-ok);
+}
+
+.psa-reasoning {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: var(--psa-text);
+  font-size: 12px;
+}
+
+/* Field conditions */
+.psa-field {
+  color: var(--psa-muted);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+/* Learned opponent profile */
+.psa-profile {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--psa-muted);
+  font-size: 11px;
+  background: #1a1e27;
+  border: 1px solid var(--psa-border);
+  border-radius: 6px;
+  padding: 5px 9px;
+  margin-bottom: 8px;
+}
+
+.psa-profile strong {
+  color: var(--psa-text);
+}
+
+/* Side columns */
+.psa-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.psa-side-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--psa-muted);
+  margin: 0 0 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.psa-name {
+  color: var(--psa-text);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.psa-sideeffects {
+  color: var(--psa-warn);
+  font-size: 11px;
+  margin-top: 6px;
+}
+
+/* Pokémon cards */
+.psa-card {
+  background: #20242e;
+  border: 1px solid #2e3340;
+  border-radius: 8px;
+  padding: 7px 9px;
+  margin-bottom: 6px;
+}
+
+.psa-card.psa-active {
+  border-color: var(--psa-accent);
+  box-shadow: 0 0 0 1px var(--psa-accent);
+}
+
+.psa-card.psa-fainted {
+  opacity: 0.45;
+}
+
+.psa-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.psa-species {
+  font-weight: 700;
+}
+
+.psa-tag {
+  font-size: 10px;
+  border-radius: 4px;
+  padding: 0 5px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.psa-tag-active {
+  background: rgba(79, 195, 247, 0.18);
+  color: var(--psa-accent);
+  border: 1px solid rgba(79, 195, 247, 0.5);
+}
+
+.psa-tag-fainted {
+  background: rgba(239, 83, 80, 0.15);
+  color: var(--psa-danger);
+  border: 1px solid rgba(239, 83, 80, 0.5);
+}
+
+.psa-status {
+  font-size: 10px;
+  border-radius: 4px;
+  padding: 0 5px;
+  font-weight: 600;
+}
+
+.psa-status-psn, .psa-status-tox { background: #7b1fa2; color: #fff; }
+.psa-status-brn { background: #ef6c00; color: #fff; }
+.psa-status-par { background: #f9a825; color: #222; }
+.psa-status-slp { background: #1565c0; color: #fff; }
+.psa-status-frz { background: #4dd0e1; color: #102027; }
+
+/* HP bar */
+.psa-hpbar {
+  height: 7px;
+  border-radius: 4px;
+  background: #12141a;
+  border: 1px solid #2e3340;
+  overflow: hidden;
+  margin: 6px 0 3px;
+}
+
+.psa-hpfill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.25s ease;
+}
+
+.psa-hp-high { background: var(--psa-ok); }
+.psa-hp-mid { background: var(--psa-warn); }
+.psa-hp-low { background: var(--psa-danger); }
+.psa-hp-unknown { background: #4a5160; }
+
+.psa-card-hp {
+  font-size: 11px;
+  color: var(--psa-muted);
+  margin-bottom: 3px;
+}
+
+.psa-card-moves {
+  font-size: 12px;
+  word-break: break-word;
+}
+
+.psa-hidden {
+  color: var(--psa-muted);
+  font-size: 11px;
+}
+
+.psa-card-details {
+  color: var(--psa-muted);
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.psa-boosts {
+  color: var(--psa-warn);
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.psa-muted {
+  color: var(--psa-muted);
+}
+
+/* Action log */
+.psa-log {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.psa-log summary {
+  cursor: pointer;
+  color: var(--psa-muted);
+}
+
+.psa-log ol {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  color: var(--psa-text);
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.psa-log-turn {
+  color: var(--psa-muted);
+  font-size: 11px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Overlay shell (extension only)                                      */
+/* ------------------------------------------------------------------ */
+
+.psa-overlay {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 2147483000;
+}
+
+.psa-hide {
+  background: #2d323d;
+  color: var(--psa-text);
+  border: 1px solid var(--psa-border);
+  border-radius: 6px;
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  margin-left: 2px;
+}
+
+.psa-hide:hover {
+  background: #3a4150;
+}
+
+.psa-reopen {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 2147483000;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  font-size: 18px;
+  cursor: pointer;
+  background: #22262f;
+  color: var(--psa-text);
+  border: 1px solid var(--psa-border);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+}
+
+.psa-reopen:hover {
+  background: #2d323d;
+}

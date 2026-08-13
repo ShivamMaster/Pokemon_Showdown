@@ -1,0 +1,263 @@
+// test/profiles.test.js
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+import {
+  summarizeBattle,
+  updateProfile,
+  profileForEngine,
+  profileForDisplay,
+} from '../src/profiles/index.js';
+import { loadProfiles, saveProfiles } from '../src/profiles/store.js';
+import { parseLog } from '../src/reader/reader.js';
+import { buildPanelHtml } from '../src/ui/panel.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const realLog = readFileSync(path.join(__dirname, 'fixtures', 'real-battle.log'), 'utf8');
+
+// ---------------------------------------------------------------------------
+// Helpers for hand-built states
+// ---------------------------------------------------------------------------
+
+const mon = (ident, species, over = {}) => ({
+  ident,
+  species,
+  moves: [],
+  item: null,
+  itemRevealed: false,
+  ability: null,
+  hpPercent: 100,
+  fainted: false,
+  active: false,
+  ...over,
+});
+
+// A tiny state with the minimum the summarizer needs: both sides, a journal,
+// and a winner. hpPercent on switch actions is the HP the *incoming* mon
+// carries; the summarizer reads the outgoing mon's last known HP from prior
+// damage/heal actions on that ident.
+const makeState = ({ winner = null, turn = 3, actions = [] } = {}) => ({
+  format: '[Gen 9] OU',
+  turn,
+  winner,
+  actions,
+  sides: {
+    p1: {
+      playerName: 'BaddyGames',
+      pokemon: [mon('p1a: Rillaboom', 'Rillaboom')],
+    },
+    p2: {
+      playerName: 'vkhss',
+      pokemon: [mon('p2a: Great Tusk', 'Great Tusk'), mon('p2b: Glimmora', 'Glimmora')],
+    },
+  },
+});
+
+const action = (over) => ({ turn: 1, side: 'p2', ident: 'p2a: Great Tusk', type: 'move', ...over });
+
+// ---------------------------------------------------------------------------
+// summarizeBattle on the real fixture
+// ---------------------------------------------------------------------------
+
+test('summarizeBattle: real fixture yields opponent, result, leads, and revealed info', () => {
+  const state = parseLog(realLog);
+  const s = summarizeBattle(state, 'p1');
+
+  assert.equal(s.opponent, 'vkhss');
+  assert.equal(s.result, 'win'); // we are p1 (BaddyGames) and they lost
+  assert.equal(s.turns, 22);
+  assert.equal(s.theirLead, 'Great Tusk');
+  assert.equal(s.ourLead, 'Raging Bolt');
+
+  // Voluntary switch-ins only: Dragonite entered 4 times, but one was forced.
+  assert.equal(s.switchIns['Dragonite'], 2);
+  assert.equal(s.switchIns['Glimmora'], 3);
+  assert.equal(s.switchIns['Great Tusk'], 1);
+
+  // Move usage per species, in reveal order.
+  assert.deepEqual(s.movesUsed['Dragonite'], ['Encore', 'Scale Shot']);
+  assert.deepEqual(s.movesUsed['Roaring Moon'], ['Knock Off', 'Dragon Dance']);
+
+  // Revealed sets include item/ability when known.
+  assert.equal(s.sets['Great Tusk'].item, 'Leftovers');
+  assert.equal(s.sets['Glimmora'].ability, 'Toxic Debris');
+  assert.equal(s.sets['Dragonite'].item, 'Loaded Dice');
+  assert.deepEqual(s.sets['Dragonite'].moves, ['Encore', 'Scale Shot']);
+});
+
+// ---------------------------------------------------------------------------
+// summarizeBattle: switch / faint accounting
+// ---------------------------------------------------------------------------
+
+test('summarizeBattle: voluntary switches count, forced ones (faint-follow, drag) do not', () => {
+  const state = makeState({
+    actions: [
+      action({ type: 'faint', ident: 'p2b: Glimmora' }), // p2 lost their active -> next switch is forced
+      action({ type: 'switch', ident: 'p2a: Great Tusk', species: 'Great Tusk', forced: false, hpPercent: 100 }), // follows a faint -> forced
+      action({ type: 'switch', ident: 'p2b: Glimmora', species: 'Glimmora', forced: true, hpPercent: 100 }), // drag
+      action({ type: 'switch', ident: 'p2a: Great Tusk', species: 'Great Tusk', forced: false, hpPercent: 100 }), // free choice
+    ],
+  });
+  const s = summarizeBattle(state, 'p1');
+  assert.equal(s.switchIns['Great Tusk'], 1, 'only the free-choice switch counts');
+  assert.equal(s.switchIns['Glimmora'], undefined, 'forced switch-in must not count as voluntary');
+});
+
+test('summarizeBattle: low-HP switches and low-HP faints are counted', () => {
+  const state = makeState({
+    actions: [
+      // Glimmora enters as the lead (the lead-in switch is a real log action,
+      // and it is what lets the summarizer know who is active).
+      action({ type: 'switch', ident: 'p2b: Glimmora', species: 'Glimmora', forced: false, hpPercent: 100 }),
+      // Glimmora takes damage down to 25% (below the 40% threshold)...
+      action({ type: 'damage', ident: 'p2b: Glimmora', hpPercent: 25 }),
+      // ...then switches out voluntarily -> lowHpSwitch
+      action({ type: 'switch', ident: 'p2a: Great Tusk', species: 'Great Tusk', forced: false, hpPercent: 100 }),
+      // Great Tusk gets chunked to 35%, then faints -> lowHpFaint
+      action({ type: 'damage', ident: 'p2a: Great Tusk', hpPercent: 35 }),
+      action({ type: 'faint', ident: 'p2a: Great Tusk' }),
+      // A healthy 60% mon fainting does not count
+      action({ type: 'damage', ident: 'p2a: Great Tusk', hpPercent: 60 }),
+      action({ type: 'faint', ident: 'p2a: Great Tusk' }),
+    ],
+  });
+  const s = summarizeBattle(state, 'p1');
+  assert.equal(s.lowHpSwitches, 1);
+  assert.equal(s.lowHpFaints, 1);
+});
+
+test('summarizeBattle: incomplete battle (no winner) reports result incomplete', () => {
+  const s = summarizeBattle(makeState({ winner: null }), 'p1');
+  assert.equal(s.result, 'incomplete');
+});
+
+// ---------------------------------------------------------------------------
+// updateProfile: aggregation across battles
+// ---------------------------------------------------------------------------
+
+test('updateProfile: aggregates record, leads, switch-ins, move usage, and sets', () => {
+  const base = summarizeBattle(parseLog(realLog), 'p1');
+  let p = updateProfile(null, base);
+  p = updateProfile(p, { ...base, result: 'loss', theirLead: 'Landorus-Therian' });
+
+  assert.equal(p.totalBattles, 2);
+  assert.deepEqual(p.record, { win: 1, loss: 1, tie: 0 });
+  assert.deepEqual(p.commonLeads, { 'Great Tusk': 1, 'Landorus-Therian': 1 });
+
+  // switchIns accumulate across battles
+  assert.equal(p.switchIns['Glimmora'], 6); // 3 + 3
+  assert.equal(p.switchIns['Dragonite'], 4); // 2 + 2
+
+  // move usage accumulates per species
+  assert.equal(p.moveUsage['Dragonite']['Encore'], 2);
+  assert.equal(p.moveUsage['Great Tusk']['Earthquake'], 2);
+
+  // sets merge moves without duplicating, item/ability carry over
+  const dn = p.sets['Dragonite'];
+  assert.equal(dn.timesSeen, 2);
+  assert.deepEqual(dn.moves, ['Encore', 'Scale Shot']);
+  assert.equal(dn.item, 'Loaded Dice');
+
+  // the battles log keeps the last 20
+  assert.equal(p.battles.length, 2);
+  for (let i = 0; i < 25; i++) p = updateProfile(p, { ...base, result: 'win' });
+  assert.equal(p.battles.length, 20);
+});
+
+// ---------------------------------------------------------------------------
+// profileForEngine / profileForDisplay projections
+// ---------------------------------------------------------------------------
+
+test('profileForEngine: switchTendency.atLowHp ratio and commonSwitchIns', () => {
+  const p = updateProfile(null, {
+    opponent: 'vkhss',
+    result: 'win',
+    lowHpSwitches: 1,
+    lowHpFaints: 3, // 1 of 4 low-HP situations ended in a switch
+    switchIns: { 'Great Tusk': 2, 'Glimmora': 1 },
+    movesUsed: {},
+    sets: {},
+  });
+  assert.deepEqual(profileForEngine(p), {
+    switchTendency: { atLowHp: 0.25 },
+    commonSwitchIns: { 'Great Tusk': 2, 'Glimmora': 1 },
+  });
+});
+
+test('profileForEngine: returns null when there is nothing learned', () => {
+  assert.equal(profileForEngine(null), null);
+  const empty = updateProfile(null, { opponent: 'x', result: 'incomplete', switchIns: {}, movesUsed: {}, sets: {} });
+  assert.equal(profileForEngine(empty), null);
+});
+
+test('profileForDisplay: record text, common lead %, low-HP switch rate', () => {
+  let p = updateProfile(null, {
+    opponent: 'vkhss',
+    result: 'win',
+    theirLead: 'Great Tusk',
+    lowHpSwitches: 2,
+    lowHpFaints: 2,
+    switchIns: {},
+    movesUsed: {},
+    sets: {},
+  });
+  p = updateProfile(p, { ...p.battles[0], result: 'loss' }); // second battle, same lead
+  assert.deepEqual(profileForDisplay(p), {
+    opponent: 'vkhss',
+    battles: 2,
+    recordText: '1-1',
+    commonLead: { species: 'Great Tusk', pct: 100 },
+    lowHpSwitchRate: 50,
+  });
+});
+
+test('profileForDisplay: tie shows in record, and empty profile is null', () => {
+  const p = updateProfile(null, {
+    opponent: 'vkhss',
+    result: 'tie',
+    lowHpSwitches: 0,
+    lowHpFaints: 0,
+    switchIns: {},
+    movesUsed: {},
+    sets: {},
+  });
+  assert.equal(profileForDisplay(p).recordText, '0-0-1');
+  assert.equal(profileForDisplay(p).lowHpSwitchRate, null);
+  assert.equal(profileForDisplay(null), null);
+});
+
+// ---------------------------------------------------------------------------
+// Storage adapter (memory fallback, as used in Node/tests)
+// ---------------------------------------------------------------------------
+
+test('store: save/load round-trips profiles through the memory fallback', async () => {
+  const p = updateProfile(null, summarizeBattle(parseLog(realLog), 'p1'));
+  await saveProfiles({ vkhss: p });
+  const loaded = await loadProfiles();
+  assert.equal(loaded.vkhss.totalBattles, 1);
+  assert.equal(loaded.vkhss.record.win, 1);
+  assert.deepEqual(loaded.vkhss.battles[0].movesUsed['Dragonite'], ['Encore', 'Scale Shot']);
+});
+
+// ---------------------------------------------------------------------------
+// Panel profile strip
+// ---------------------------------------------------------------------------
+
+test('panel: renders the vs-opponent profile strip', () => {
+  const p = updateProfile(null, summarizeBattle(parseLog(realLog), 'p1'));
+  const html = buildPanelHtml(parseLog(realLog), { ourSideId: 'p1', profile: profileForDisplay(p) });
+  assert.ok(html.includes('psa-profile'));
+  assert.ok(html.includes('vs <strong>vkhss</strong>'));
+  assert.ok(html.includes('1 battle'));
+  assert.ok(html.includes('record 1-0'));
+  assert.ok(html.includes('lead Great Tusk 100%'));
+  assert.match(html, /switches when low \d+%/);
+});
+
+test('panel: no profile strip when no profile is passed', () => {
+  const html = buildPanelHtml(parseLog(realLog), { ourSideId: 'p1' });
+  assert.ok(!html.includes('psa-profile'));
+});

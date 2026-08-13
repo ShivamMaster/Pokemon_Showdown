@@ -1,0 +1,6 @@
+node_modules/
+demo/demo.bundle.js
+extension/dist/
+extension/icons/
+*.log
+.DS_Store

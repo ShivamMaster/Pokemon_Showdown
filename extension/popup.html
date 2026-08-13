@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: #1b1e27;
+        color: #e6e9f0;
+        width: 220px;
+      }
+      .psa-popup {
+        padding: 12px;
+      }
+      .psa-popup-title {
+        font-size: 14px;
+        font-weight: 600;
+        margin-bottom: 10px;
+      }
+      .psa-popup-setting {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        margin-bottom: 8px;
+        cursor: pointer;
+      }
+      .psa-popup-link {
+        width: 100%;
+        background: #232837;
+        color: #9ecbff;
+        border: 1px solid #2a2f3d;
+        border-radius: 6px;
+        padding: 6px 0;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .psa-popup-link:hover {
+        background: #2a3040;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="psa-root"></div>
+    <script type="module" src="dist/popup.js"></script>
+  </body>
+</html>

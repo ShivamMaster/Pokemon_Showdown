@@ -1,0 +1,263 @@
+// test/engine.test.js
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+import { calculate, Pokemon, Move, Field } from '@smogon/calc';
+import { createBattleState, createPokemon, addMove } from '../src/reader/state.js';
+import { parseLog } from '../src/reader/reader.js';
+import { damagePercent } from '../src/engine/calc.js';
+import {
+  recommend,
+  predictStayProb,
+  predictSwitchProbs,
+  utilityScore,
+} from '../src/engine/index.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const realLog = readFileSync(path.join(__dirname, 'fixtures', 'real-battle.log'), 'utf8');
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// Build a BattleState directly (no log) so scenarios are fully controlled.
+function makeState({ ourActive, theirActive, ourBench = [], theirBench = [], gen = 9, winner = null }) {
+  const state = createBattleState();
+  state.gen = gen;
+  state.turn = 3;
+  state.winner = winner;
+  state.gametype = 'singles';
+  state.sides.p1.playerName = 'Me';
+  state.sides.p2.playerName = 'Rival';
+
+  const add = (sideId, specs, activeSpecies) => {
+    const side = state.sides[sideId];
+    const letters = 'abcdef';
+    side.pokemon = specs.map((spec, i) => {
+      const rec = createPokemon({
+        ident: `${sideId}${letters[i]}: ${spec.species}`,
+        side: sideId,
+        species: spec.species,
+        level: spec.level ?? 100,
+      });
+      rec.hpPercent = spec.hpPercent ?? 100;
+      rec.hp = { cur: spec.hpPercent ?? 100, max: 100 };
+      if (spec.status) rec.status = spec.status;
+      if (spec.item) {
+        rec.item = spec.item;
+        rec.itemRevealed = true;
+      }
+      if (spec.boosts) Object.assign(rec.boosts, spec.boosts);
+      for (const mv of spec.moves ?? []) addMove(rec, mv);
+      if (spec.fainted) rec.fainted = true;
+      return rec;
+    });
+    const active = side.pokemon.find((p) => p.species === activeSpecies);
+    if (active) {
+      side.active = [active.ident];
+      active.active = true;
+    }
+  };
+
+  add('p1', [...(ourActive ? [ourActive] : []), ...ourBench], ourActive?.species);
+  add('p2', [...(theirActive ? [theirActive] : []), ...theirBench], theirActive?.species);
+  return state;
+}
+
+const fullIvs = { hp: 31, atk: 31, def: 31, spa: 31, spd: 31, spe: 31 };
+
+// ---------------------------------------------------------------------------
+// Move ranking
+// ---------------------------------------------------------------------------
+
+test('engine: super-effective move is recommended (Charizard vs Ferrothorn)', () => {
+  const state = makeState({
+    ourActive: { species: 'Charizard', moves: ['Fire Blast', 'Air Slash', 'Dragon Pulse'] },
+    theirActive: { species: 'Ferrothorn', moves: ['Power Whip', 'Gyro Ball', 'Leech Seed'] },
+  });
+  const rec = recommend(state);
+  assert.equal(rec.bestMove.move, 'Fire Blast');
+  assert.equal(rec.bestMove.expected.effectiveness, 4); // Fire vs Grass/Steel
+  assert.ok(rec.reasoning.some((r) => r.includes('4×')), 'reasoning should mention 4×');
+  assert.ok(rec.reasoning.some((r) => r.includes('KO')), 'Fire Blast should threaten a KO at full HP');
+  assert.equal(rec.switchTo, null, 'no switch when the matchup is won');
+});
+
+test('engine: KO callout when their mon is low', () => {
+  const state = makeState({
+    ourActive: { species: 'Charizard', moves: ['Fire Blast', 'Dragon Pulse'] },
+    theirActive: { species: 'Venusaur', hpPercent: 20, moves: ['Sludge Bomb'] },
+  });
+  const rec = recommend(state);
+  assert.equal(rec.bestMove.move, 'Fire Blast');
+  assert.ok(rec.bestMove.expected.max >= 20);
+  assert.ok(rec.reasoning.some((r) => r.includes('KO')));
+});
+
+test('engine: weaker neutral move loses to coverage', () => {
+  const state = makeState({
+    ourActive: { species: 'Garchomp', moves: ['Earthquake', 'Dragon Claw'] },
+    theirActive: { species: 'Heatran', moves: ['Lava Plume', 'Flash Cannon'] },
+  });
+  const rec = recommend(state);
+  // Earthquake is 4x vs Fire/Steel Heatran (Fire is weak to Ground);
+  // Dragon Claw is resisted (0.5x by Steel).
+  assert.equal(rec.bestMove.move, 'Earthquake');
+  assert.equal(rec.bestMove.expected.effectiveness, 4);
+});
+
+// ---------------------------------------------------------------------------
+// Switch advice
+// ---------------------------------------------------------------------------
+
+test('engine: recommends switching when the current mon is doomed', () => {
+  const state = makeState({
+    ourActive: { species: 'Scizor', hpPercent: 5, moves: ['Bullet Punch', 'U-turn'] },
+    ourBench: [{ species: 'Tyranitar', moves: ['Stone Edge', 'Crunch'] }],
+    theirActive: { species: 'Charizard', moves: ['Flamethrower', 'Air Slash'] },
+  });
+  const rec = recommend(state);
+  assert.equal(rec.switchTo.species, 'Tyranitar');
+  assert.ok(rec.reasoning.some((r) => r.includes('Tyranitar')));
+});
+
+test('engine: does not over-recommend switching when the matchup is won', () => {
+  const state = makeState({
+    ourActive: { species: 'Tyranitar', hpPercent: 90, moves: ['Stone Edge', 'Crunch'] },
+    ourBench: [{ species: 'Garchomp', moves: ['Earthquake'] }],
+    theirActive: { species: 'Charizard', moves: ['Flamethrower'] },
+  });
+  const rec = recommend(state);
+  assert.equal(rec.switchTo, null, 'staying is clearly right — no switch');
+  assert.equal(rec.bestMove.move, 'Stone Edge'); // 4x vs Charizard
+});
+
+test('engine: must send in a replacement when our active is down', () => {
+  const state = makeState({
+    ourActive: { species: 'Garchomp', fainted: true, moves: ['Earthquake'] },
+    ourBench: [
+      { species: 'Gliscor', moves: ['Earthquake', 'Roost'] },
+      { species: 'Togekiss', moves: ['Air Slash'] },
+    ],
+    theirActive: { species: 'Great Tusk', moves: ['Earthquake', 'Ice Spinner'] },
+  });
+  const rec = recommend(state);
+  assert.equal(rec.bestMove, null);
+  // Gliscor is 4x weak to Ice Spinner; Togekiss is the safer send-in.
+  assert.equal(rec.switchTo.species, 'Togekiss');
+  assert.ok(rec.reasoning.some((r) => r.includes('down')));
+});
+
+test('engine: predicts their switch-in when their active is down', () => {
+  const state = makeState({
+    ourActive: { species: 'Charizard', moves: ['Fire Blast', 'Air Slash'] },
+    theirActive: { species: 'Venusaur', fainted: true, moves: ['Sludge Bomb'] },
+    theirBench: [{ species: 'Blissey', moves: ['Seismic Toss'] }],
+  });
+  const rec = recommend(state);
+  // Venusaur is down -> predict Blissey switch-in -> Fire Blast is weak vs it.
+  assert.ok(rec.bestMove);
+  assert.ok(rec.reasoning.some((r) => r.includes('most likely switch-in')));
+});
+
+// ---------------------------------------------------------------------------
+// Utility moves
+// ---------------------------------------------------------------------------
+
+test('engine: recovery is chosen when low and attacks are weak', () => {
+  const state = makeState({
+    ourActive: { species: 'Ferrothorn', hpPercent: 20, moves: ['Recover', 'Power Whip'] },
+    theirActive: { species: 'Blissey', moves: ['Seismic Toss', 'Soft-Boiled'] },
+  });
+  const rec = recommend(state);
+  assert.equal(rec.bestMove.move, 'Recover');
+  assert.ok(rec.bestMove.note.includes('recovery'));
+});
+
+test('utilityScore: known utility moves score, damaging moves do not', () => {
+  assert.equal(utilityScore('Recover').value, 0.5);
+  assert.equal(utilityScore('Swords Dance').value, 0.3);
+  assert.equal(utilityScore('Earthquake'), null);
+});
+
+// ---------------------------------------------------------------------------
+// Consistency with @smogon/calc
+// ---------------------------------------------------------------------------
+
+test('engine: damage numbers match @smogon/calc directly', () => {
+  const state = makeState({
+    ourActive: { species: 'Charizard', moves: ['Fire Blast'] },
+    theirActive: { species: 'Venusaur', moves: ['Sludge Bomb'] },
+  });
+  const ourMon = state.sides.p1.pokemon[0];
+  const theirMon = state.sides.p2.pokemon[0];
+
+  const atk = new Pokemon(9, 'Charizard', { level: 100, nature: 'Serious', evs: { spa: 252 }, ivs: fullIvs });
+  const def = new Pokemon(9, 'Venusaur', { level: 100, nature: 'Serious', evs: { hp: 252, spd: 252 }, ivs: fullIvs });
+  const res = calculate(9, atk, def, new Move(9, 'Fire Blast'), new Field());
+  const directMean = Math.round((res.damage.reduce((a, b) => a + b, 0) / res.damage.length / def.maxHP()) * 1000) / 10;
+
+  const engine = damagePercent(9, ourMon, theirMon, 'Fire Blast', new Field());
+  assert.equal(engine.mean, directMean);
+  assert.equal(engine.effectiveness, 2); // Fire vs Grass/Poison Venusaur
+});
+
+// ---------------------------------------------------------------------------
+// Switch prediction / profile plumbing
+// ---------------------------------------------------------------------------
+
+test('predictStayProb: HP-based defaults and profile override', () => {
+  assert.equal(predictStayProb({ hpPercent: 90 }), 0.8);
+  assert.equal(predictStayProb({ hpPercent: 40 }), 0.6);
+  assert.equal(predictStayProb({ hpPercent: 20 }), 0.35);
+  assert.equal(predictStayProb({ hpPercent: 20 }, { switchTendency: { atLowHp: 0.9 } }), 0.1);
+});
+
+test('predictSwitchProbs: leftover probability is split by profile weights', () => {
+  const team = [
+    { ident: 'p2b: A', species: 'A' },
+    { ident: 'p2c: B', species: 'B' },
+  ];
+  const probs = predictSwitchProbs({ ident: 'p2a: X', hpPercent: 100 }, team, 0.8, {
+    commonSwitchIns: { A: 1, B: 3 },
+  });
+  const total = probs['p2b: A'] + probs['p2c: B'];
+  assert.ok(Math.abs(total - 0.2) < 1e-9, `switch probability should sum to 0.2, got ${total}`);
+  assert.ok(Math.abs(probs['p2c: B'] - 0.15) < 1e-9, 'B is 3x as likely as A');
+});
+
+// ---------------------------------------------------------------------------
+// Real fixture
+// ---------------------------------------------------------------------------
+
+test('fixture: final state -> battle over note', () => {
+  const state = parseLog(realLog);
+  const rec = recommend(state);
+  assert.equal(rec.bestMove, null);
+  assert.equal(rec.switchTo, null);
+  assert.ok(rec.note.includes('BaddyGames wins'));
+});
+
+test('fixture: mid-battle state produces a sensible move', () => {
+  const lines = realLog.split('\n');
+  const prefix = lines.slice(0, lines.indexOf('|turn|2')).join('\n');
+  const state = parseLog(prefix);
+  const rec = recommend(state);
+  // Turn 1: Raging Bolt vs Great Tusk; only Dragon Pulse is revealed for us.
+  assert.equal(rec.bestMove.move, 'Dragon Pulse');
+  assert.ok(rec.reasoning.length > 0);
+  assert.ok(rec.reasoning.some((r) => r.includes('Dragon Pulse')));
+});
+
+test('fixture: full recommendation at the last decision point (turn 22)', () => {
+  const lines = realLog.split('\n');
+  const prefix = lines.slice(0, lines.indexOf('|turn|22')).join('\n');
+  const state = parseLog(prefix);
+  const rec = recommend(state);
+  assert.equal(rec.bestMove.move, 'Knock Off'); // best neutral hit vs Dragonite
+  assert.ok(rec.reasoning.length > 0);
+  assert.ok(rec.reasoning.some((r) => r.includes('unknown move')), 'should flag Dragonite\'s hidden moves');
+});
