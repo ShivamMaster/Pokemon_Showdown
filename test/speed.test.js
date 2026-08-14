@@ -341,6 +341,86 @@ test('speed: observed order also wins under Trick Room', () => {
   assert.equal(order.observed, true);
 });
 
+test('speed: a mon that left and came back keeps its observed order (species fallback)', () => {
+  const state = baseState();
+  // Ours never left (switchCount 1, exact ident); theirs re-entered under a new
+  // slot letter (p2a -> p2b, switchCount 2). The evidence was recorded while
+  // theirs was p2a, so an exact ident match fails — species must carry it.
+  const ours = makeMon('Raging Bolt');
+  ours.ident = 'p1a: Raging Bolt';
+  const theirs = makeMon('Great Tusk');
+  theirs.ident = 'p2b: Great Tusk';
+  theirs.side = 'p2';
+  theirs.switchCount = 2;
+  state.speedEvidence.push({
+    turn: 3,
+    fasterSide: 'p2',
+    p1Ident: 'p1a: Raging Bolt',
+    p2Ident: 'p2a: Great Tusk',
+    p1Species: 'Raging Bolt',
+    p2Species: 'Great Tusk',
+    p1Move: 'Dragon Pulse',
+    p2Move: 'Earthquake',
+    clean: true,
+    trickRoom: false,
+    ver: { p1: 0, p2: 0, field: 0, side1: 0, side2: 0 },
+  });
+  const ev = findSpeedEvidence(state, ours, theirs, 'p1');
+  assert.ok(ev, 'evidence must be found after the opponent re-entered');
+  const order = speedOrder(ours, theirs, 9, state, 'p1');
+  assert.equal(order.observed, true);
+  assert.equal(order.weMoveFirst, false, 'their re-entered mon still outspeeds us');
+  // And without a re-entry (switchCount 1), the old ident never matches.
+  const neverLeft = makeMon('Great Tusk');
+  neverLeft.ident = 'p2b: Great Tusk';
+  neverLeft.side = 'p2';
+  assert.equal(findSpeedEvidence(state, ours, neverLeft, 'p1'), null);
+});
+
+test('speed: species-keyed memory narrows the base range and survives re-entry', () => {
+  const state = baseState();
+  // No stats revealed — the plain calc guess is the full 240-333 for Garchomp.
+  const garchomp = makeMon('Garchomp');
+  assert.deepEqual(effectiveSpeedRange(9, garchomp, state, 'p2'), { min: 240, max: 333 });
+  // The reader learned (from an earlier trade vs a 295-Speed mon) that
+  // Garchomp's base Speed is at most 295 — the memory applies regardless of
+  // which ident the mon currently holds.
+  state.speedMemory.p2.Garchomp = { min: null, max: 295, turn: 1 };
+  assert.deepEqual(effectiveSpeedRange(9, garchomp, state, 'p2'), { min: 240, max: 295, source: 'memory' });
+  // Bounds on both sides narrow from both ends.
+  state.speedMemory.p2.Garchomp = { min: 260, max: 290, turn: 2 };
+  assert.deepEqual(effectiveSpeedRange(9, garchomp, state, 'p2'), { min: 260, max: 290, source: 'memory' });
+  // Modifiers still apply on top of the remembered base (e.g. paralysis).
+  garchomp.status = 'par';
+  const par = effectiveSpeedRange(9, garchomp, state, 'p2');
+  assert.equal(par.min, Math.round(260 * 0.5));
+  assert.equal(par.max, Math.round(290 * 0.5));
+  assert.equal(par.source, 'memory');
+});
+
+test('speed: a memory that contradicts the species is discarded', () => {
+  const state = baseState();
+  const garchomp = makeMon('Garchomp');
+  // Bounds above the species' possible Speed can't be real — fall back to the
+  // plain calc range with no source marker.
+  state.speedMemory.p2.Garchomp = { min: 350, max: 400, turn: 1 };
+  assert.deepEqual(effectiveSpeedRange(9, garchomp, state, 'p2'), { min: 240, max: 333 });
+});
+
+test('speed: a remembered range is labelled in the line', () => {
+  const state = baseState();
+  const ours = makeMon('Raging Bolt');
+  const theirs = makeMon('Garchomp');
+  theirs.side = 'p2';
+  state.speedMemory.p2.Garchomp = { min: null, max: 290, turn: 1 };
+  const line = speedLine(ours, theirs, 9, state, 'p1');
+  assert.match(line, /240-290/);
+  assert.match(line, /\(speed remembered from earlier trades\)/);
+  // Not remembered -> no label.
+  delete state.speedMemory.p2.Garchomp;
+  assert.doesNotMatch(speedLine(ours, theirs, 9, state, 'p1'), /\(speed remembered from earlier trades\)/);
+});
+
 // ---------------------------------------------------------------------------
 // speedLine text
 // ---------------------------------------------------------------------------

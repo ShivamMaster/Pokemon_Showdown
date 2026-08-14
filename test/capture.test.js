@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { blockHashes, changedBlocks, createCapture } from '../src/content/capture.js';
+import { blockHashes, changedBlocks, maskRect, createCapture } from '../src/content/capture.js';
 
 // A minimal fake 2D context that returns deterministic pixel data.
 function fakeContext(width, height, fill) {
@@ -58,6 +58,40 @@ test('changedBlocks: idle animation (a few blocks) is ignored, real changes coun
   const tip = changedBlocks(blockHashes(quiet, 320, 180), blockHashes(tooltip, 320, 180), bw);
   assert.ok(tip.count >= 5, `a tooltip must count as a change, got ${tip.count}`);
   assert.ok(tip.bx0 <= 2 && tip.bx1 >= 4, 'the change bbox spans the tooltip region');
+});
+
+test('maskRect: the panel region is ignored by the change diff', () => {
+  const bw = 10;
+  const bh = 6; // 320x180 frame at 32px blocks (rows beyond 5 are partial)
+  // Frame 1: quiet. Frame 2: a change in the top-right (where the panel sits)
+  // AND a change in the bottom-left (the battle itself).
+  const quiet = fakeContext(320, 180, { r: 10, g: 20, b: 30 });
+  const changed = contextWithRegion(320, 180, { r: 10, g: 20, b: 30 }, { x: 250, y: 20, w: 60, h: 80 }); // panel region
+  const battle = contextWithRegion(320, 180, { r: 10, g: 20, b: 30 }, { x: 20, y: 130, w: 60, h: 40 }); // battle region
+  const ctxs = [changed, battle];
+  // The live flow masks BOTH frames (prev and cur) with the same static rect,
+  // so masked blocks always match each other and never register as changes.
+  const rect = { x: 240, y: 10, w: 80, h: 100 };
+  const blocks1 = blockHashes(quiet, 320, 180);
+  const unmasked = ctxs.map((c) => blockHashes(c, 320, 180));
+  const maskBoth = (hashes) => maskRect(hashes, rect, 320, 180, 320, 180, bw);
+  const masked = ctxs.map((c) => maskBoth(blockHashes(c, 320, 180)));
+  const maskedQuiet = maskBoth(blockHashes(quiet, 320, 180));
+
+  // Without the mask, BOTH changes count (the panel scroll would be noise).
+  assert.ok(changedBlocks(blocks1, unmasked[0], bw).count >= 5, 'unmasked panel change counts');
+  assert.ok(changedBlocks(blocks1, unmasked[1], bw).count >= 5, 'unmasked battle change counts');
+
+  // With the mask, the panel-region change disappears but the battle change
+  // (outside the rect) still registers.
+  assert.equal(changedBlocks(maskedQuiet, masked[0], bw).count, 0, 'panel-region change must be masked out');
+  assert.ok(changedBlocks(maskedQuiet, masked[1], bw).count >= 5, 'battle change outside the panel still counts');
+
+  // Sanity: the mask only zeroes blocks under the rect.
+  const rectBlocks = maskRect(new Array(bw * bh).fill(7), { x: 240, y: 10, w: 80, h: 100 }, 320, 180, 320, 180, bw);
+  const nonzero = rectBlocks.filter((h) => h !== 0).length;
+  assert.ok(nonzero > 0, 'blocks outside the panel rect stay untouched');
+  assert.ok(nonzero < bw * bh, 'blocks inside the panel rect are zeroed');
 });
 
 test('createCapture: start/stop lifecycle and stats', async () => {

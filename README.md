@@ -97,6 +97,37 @@ best move, built in stages:
   so as they reveal their team you see both what they've shown and what
   they might still be holding.
 
+## Stage 10: speed memory, honest capture, resizable panel
+
+- **Speed memory survives switch-outs.** Same-turn move trades are now
+  recorded with **species**, and the engine keeps a species-keyed **speed
+  memory** of rough base-Speed bounds: when a clean trade happens with no
+  speed modifiers in play anywhere (all “speed versions” zero) and one side's
+  Speed is exactly known (your `|request|` stats or a point Spe range from a
+  hover), the observed order pins a bound on the other mon's base Speed —
+  “their Garchomp moved after my 295-Speed Rillaboom, so its base Speed is
+  at most 295.” Because it's species-keyed, **a Pokémon that leaves and comes
+  back keeps its remembered speed** instead of returning to the full 0→252
+  guess, and the speed line labels it: “(speed remembered from earlier
+  trades).” Equal-Speed ties break randomly, so the bound is ≤/≥ (never
+  strict), and a bound that contradicts the species' possible Speed is
+  discarded rather than producing an inverted range.
+- **A re-entered Pokémon keeps its observed move order.** Evidence recorded
+  against `p2a: Garchomp` still applies when the same mon returns as `p2b` —
+  the reader reuses the record (same species, same speed versions), so the
+  engine matches the observation by species and keeps saying “it moved first
+  when you last traded moves” instead of falling back to overlapping ranges.
+- **The panel is masked out of screen capture.** The assistant panel lives
+  inside the captured tab, so scrolling or resizing it used to register as a
+  constant “the screen changed” (and could retrigger OCR). The block diff
+  now masks the overlay's on-screen rectangle on both frames, so the capture
+  only reacts to the battle behind it.
+- **The panel is resizable.** A corner handle (⤡) drags the panel to any
+  size (240–800px wide, up to 90% of the window tall); the body then fills
+  the set height and scrolls internally. The size survives re-renders and
+  page loads (overlay dataset + localStorage), and double-clicking the
+  handle resets to the default size.
+
 ## Stage 6: screen reading, tera & movepools
 
 Three additions that give the engine more of what you know at the table:

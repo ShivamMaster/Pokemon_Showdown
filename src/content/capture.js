@@ -49,6 +49,26 @@ export function blockHashes(ctx, w, h) {
   return out;
 }
 
+// Zero out the hashes of every block overlapped by a page-space rectangle
+// (the assistant panel itself). The panel is part of the captured tab, so
+// scrolling or resizing it would otherwise register as a constant "screen
+// change" — masking it keeps the diff honest about the battle, not the
+// extension. Mutates and returns `blocks`.
+export function maskRect(blocks, rect, pageW, pageH, frameW, frameH, bw) {
+  if (!blocks || !rect || !rect.w || !rect.h || !pageW || !pageH) return blocks;
+  const bh = Math.ceil(frameH / BLOCK);
+  const bx0 = Math.max(0, Math.floor(((rect.x / pageW) * frameW) / BLOCK));
+  const by0 = Math.max(0, Math.floor(((rect.y / pageH) * frameH) / BLOCK));
+  const bx1 = Math.min(bw - 1, Math.ceil((((rect.x + rect.w) / pageW) * frameW) / BLOCK) - 1);
+  const by1 = Math.min(bh - 1, Math.ceil((((rect.y + rect.h) / pageH) * frameH) / BLOCK) - 1);
+  for (let by = by0; by <= by1; by++) {
+    for (let bx = bx0; bx <= bx1; bx++) {
+      blocks[by * bw + bx] = 0;
+    }
+  }
+  return blocks;
+}
+
 // How many blocks differ between two frames, plus the bounding box (in block
 // units) of the changed area. Returns { count, bx0, by0, bx1, by1 }.
 export function changedBlocks(prev, cur, bw) {
@@ -78,12 +98,19 @@ export function changedBlocks(prev, cur, bw) {
   };
 }
 
-export function createCapture({ video = document.createElement('video'), canvas = document.createElement('canvas') } = {}) {
+export function createCapture({ video = document.createElement('video'), canvas = document.createElement('canvas'), maskEl = null } = {}) {
   let stream = null;
   let timer = null;
   let prevBlocks = null;
   const stats = { active: false, frames: 0, changes: 0, width: FRAME_W, height: FRAME_H };
   let onUpdate = null;
+  // The page element whose on-screen region should be ignored by change
+  // detection (defaults to the assistant panel). Lazily resolved each tick so
+  // it works whether or not the panel exists, and safely in non-DOM tests.
+  const getMaskEl =
+    maskEl ??
+    (() =>
+      typeof document !== 'undefined' ? document.getElementById('psa-overlay') : null);
 
   const ctx = canvas.getContext('2d');
   canvas.width = FRAME_W;
@@ -94,9 +121,17 @@ export function createCapture({ video = document.createElement('video'), canvas 
     try {
       ctx.drawImage(video, 0, 0, FRAME_W, FRAME_H);
       const blocks = blockHashes(ctx, FRAME_W, FRAME_H);
+      const bw = Math.ceil(FRAME_W / BLOCK);
+      // Ignore the assistant panel's own region: scrolling/resizing it is the
+      // user interacting with the extension, not a change on the battle.
+      const el = getMaskEl();
+      if (el && typeof el.getBoundingClientRect === 'function' && typeof window !== 'undefined') {
+        const r = el.getBoundingClientRect();
+        maskRect(blocks, r, window.innerWidth, window.innerHeight, FRAME_W, FRAME_H, bw);
+      }
       stats.frames += 1;
       const first = prevBlocks === null;
-      const { count } = changedBlocks(prevBlocks, blocks, Math.ceil(FRAME_W / BLOCK));
+      const { count } = changedBlocks(prevBlocks, blocks, bw);
       prevBlocks = blocks;
       // Only meaningful changes count: a tooltip/HP-bar/log change moves many
       // blocks; idle sprite animation moves a few and is ignored.

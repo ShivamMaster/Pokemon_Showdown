@@ -20,6 +20,57 @@
   min-width: 300px;
   max-width: 400px;
   overflow: hidden;
+  position: relative; /* anchor for the resize handle */
+}
+
+/* Corner drag handle — resize the panel (width + height). */
+.psa-resize {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--psa-muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: nwse-resize;
+  border-radius: 6px;
+  z-index: 2;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.psa-resize:hover {
+  color: var(--psa-text);
+  background: rgba(79, 195, 247, 0.18);
+}
+
+.psa-panel.psa-collapsed .psa-resize {
+  display: none;
+}
+
+/* A custom-sized panel (user dragged the handle): the body fills the set
+   height and scrolls internally, instead of growing to the content. */
+.psa-panel.psa-sized {
+  display: flex;
+  flex-direction: column;
+}
+
+.psa-panel.psa-sized .psa-header {
+  flex-shrink: 0;
+}
+
+.psa-panel.psa-sized .psa-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+
+.psa-panel.psa-collapsed {
+  height: auto !important; /* collapsed always hugs the header */
 }
 
 .psa-header {

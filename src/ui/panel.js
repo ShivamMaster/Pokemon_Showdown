@@ -690,6 +690,7 @@ export function renderPanel(model) {
     <button class="psa-collapse" type="button" title="Collapse / expand">−</button>
   </div>
   <div class="psa-body">${body}</div>
+  <span class="psa-resize" title="Drag to resize · double-click to reset">⤡</span>
 </div>`;
 
   if (model.empty) {

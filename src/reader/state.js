@@ -35,7 +35,23 @@ export function createBattleState() {
     // can tell whether the observation is still valid (nothing speed-affecting
     // changed since). Bounded; side-agnostic (p1/p2 keys, no "our" concept).
     speedEvidence: [],
+    // Speed memory: sideId -> species -> { min, max, turn } — rough bounds on
+    // a mon's BASE Speed learned from observed move order against a mon whose
+    // speed was exactly known (e.g. "their Garchomp moved after my 141-speed
+    // Rillaboom, so its base Speed is at most 141"). Species-keyed, so it
+    // survives switch-outs: a mon that leaves and comes back keeps its bounds.
+    speedMemory: { p1: {}, p2: {} },
   };
+}
+
+export function rememberSpeed(state, sideId, species, bounds, turn) {
+  if (!species) return;
+  const mem = state.speedMemory[sideId];
+  const cur = mem[species] ?? { min: null, max: null, turn: 0 };
+  if (bounds.min != null) cur.min = cur.min == null ? bounds.min : Math.max(cur.min, bounds.min);
+  if (bounds.max != null) cur.max = cur.max == null ? bounds.max : Math.min(cur.max, bounds.max);
+  if (turn != null) cur.turn = Math.max(cur.turn, turn);
+  mem[species] = cur;
 }
 
 export function createSide(sideId) {

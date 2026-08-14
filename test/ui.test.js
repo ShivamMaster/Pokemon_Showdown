@@ -190,6 +190,7 @@ test('render: full panel output for the real battle', () => {
   assert.ok(html.includes('width:1%')); // Rillaboom HP bar
   assert.ok(html.includes('psa-status-psn'));
   assert.ok(html.includes('psa-collapse'));
+  assert.ok(html.includes('psa-resize')); // corner drag handle
   assert.ok(html.includes('psa-log'));
   // Fainted styling on opponent cards.
   assert.ok((html.match(/psa-fainted/g) ?? []).length >= 6);

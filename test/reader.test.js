@@ -455,6 +455,50 @@ test('speed versions: speed-relevant changes bump the counters', () => {
   assert.equal(reader.state.sides.p1.speVersion, 1, 'an unrelated side effect does not');
 });
 
+test('speed memory: a clean trade against an exactly-known speed pins a base-Speed bound', () => {
+  const reader = new BattleReader();
+  reader.applyLine('|player|p1|Me');
+  reader.applyLine('|player|p2|Rival');
+  reader.applyLine('|gametype|singles');
+  reader.applyLine('|gen|9');
+  reader.applyLine('|switch|p1a: Rillaboom|Rillaboom|100/100');
+  reader.applyLine('|switch|p2a: Garchomp|Garchomp|100/100');
+  // Our live request reveals Rillaboom's exact speed (252 Spe, Timid).
+  reader.state.sides.p1.pokemon[0].stats = { atk: 172, def: 111, spa: 81, spd: 101, spe: 295 };
+  reader.applyLine('|turn|1');
+  reader.applyLine('|move|p1a: Rillaboom|Knock Off|p2a: Garchomp');
+  reader.applyLine('|move|p2a: Garchomp|Earthquake|p1a: Rillaboom');
+  reader.applyLine('|upkeep');
+  reader.applyLine('|turn|2'); // records the evidence + memory
+
+  // Rillaboom acted first at exactly 295 — Garchomp's base Speed is at most 295.
+  assert.deepEqual(reader.state.speedMemory.p2.Garchomp, { min: null, max: 295, turn: 1 });
+  // The evidence entry carries the species so a re-entered mon can still match.
+  const ev = reader.state.speedEvidence[0];
+  assert.equal(ev.p1Species, 'Rillaboom');
+  assert.equal(ev.p2Species, 'Garchomp');
+});
+
+test('speed memory: not recorded while any speed modifier is in play', () => {
+  const reader = new BattleReader();
+  reader.applyLine('|player|p1|Me');
+  reader.applyLine('|player|p2|Rival');
+  reader.applyLine('|gametype|singles');
+  reader.applyLine('|gen|9');
+  reader.applyLine('|switch|p1a: Rillaboom|Rillaboom|100/100');
+  reader.applyLine('|switch|p2a: Garchomp|Garchomp|100/100');
+  reader.state.sides.p1.pokemon[0].stats = { atk: 172, def: 111, spa: 81, spd: 101, spe: 295 };
+  // A Speed boost is in play — effective Speed no longer equals base Speed, so
+  // the observed order can't pin a base-Speed bound.
+  reader.applyLine('|-boost|p2a: Garchomp|spe|1');
+  reader.applyLine('|turn|1');
+  reader.applyLine('|move|p1a: Rillaboom|Knock Off|p2a: Garchomp');
+  reader.applyLine('|move|p2a: Garchomp|Earthquake|p1a: Rillaboom');
+  reader.applyLine('|upkeep');
+  reader.applyLine('|turn|2');
+  assert.equal(reader.state.speedMemory.p2.Garchomp, undefined);
+});
+
 // ---------------------------------------------------------------------------
 // BattleReader can process events incrementally (live mode)
 // ---------------------------------------------------------------------------

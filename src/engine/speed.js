@@ -61,6 +61,7 @@ export function effectiveSpeedRange(gen, mon, state, sideId) {
   }
 
   let min, max;
+  let source = null;
   if (mon.stats?.spe != null) {
     min = mon.stats.spe;
     max = mon.stats.spe;
@@ -74,6 +75,24 @@ export function effectiveSpeedRange(gen, mon, state, sideId) {
     max = new Pokemon(gen, mon.species, {
       level, evs: { spe: 252 }, nature: 'Timid',
     }).stats.spe;
+    // Species-keyed speed memory: a previous same-turn trade against a mon
+    // with an exactly known Speed pinned rough bounds on this mon's base
+    // Speed (see the reader's _recordSpeedEvidence). The memory survives
+    // switch-outs, so a mon that leaves and comes back keeps "roughly how
+    // fast it might be" instead of returning to the full 0-252 guess.
+    const mem = state?.speedMemory?.[sideId]?.[mon.species];
+    if (mem && (mem.min != null || mem.max != null)) {
+      const lo = mem.min != null ? Math.max(min, mem.min) : min;
+      const hi = mem.max != null ? Math.min(max, mem.max) : max;
+      // A bound that contradicts the species' possible Speed (which would
+      // invert the range) can only come from a bad observation — discard it
+      // and keep the plain calc estimate.
+      if (lo <= hi) {
+        min = lo;
+        max = hi;
+        source = 'memory';
+      }
+    }
   }
 
   const stage = mon.boosts?.spe ?? 0;
@@ -118,21 +137,36 @@ export function effectiveSpeedRange(gen, mon, state, sideId) {
     max *= 2;
   }
 
-  return { min: Math.round(min), max: Math.round(max) };
+  const out = { min: Math.round(min), max: Math.round(max) };
+  if (source) out.source = source;
+  return out;
 }
 
-// Find the most recent speed observation for this exact active pair that is
-// still valid: same idents, nothing speed-affecting changed on either mon
-// (speVersion), on the field (weather/terrain/Trick Room), or on either side
-// (Tailwind), and the same Trick Room state. Returns null when no observation
-// applies — the ranges must speak for themselves.
+// Find the most recent speed observation for this active pair that is still
+// valid: same idents (or, for a mon that switched out and back in under a new
+// slot letter, the same species), nothing speed-affecting changed on either
+// mon (speVersion), on the field (weather/terrain/Trick Room), or on either
+// side (Tailwind), and the same Trick Room state. Returns null when no
+// observation applies — the ranges must speak for themselves.
 export function findSpeedEvidence(state, ours, theirs, ourSideId) {
   const theirSideId = ourSideId === 'p1' ? 'p2' : 'p1';
   const evs = state?.speedEvidence ?? [];
   for (let i = evs.length - 1; i >= 0; i--) {
     const ev = evs[i];
     if (!ev.clean) continue;
-    if (ev[`${ourSideId}Ident`] !== ours?.ident || ev[`${theirSideId}Ident`] !== theirs?.ident) continue;
+    // A mon that left and came back keeps its record (species match) but gets
+    // a new slot ident (p2a -> p2b), so an exact ident match fails even though
+    // the observation is still valid. Accept a species match when the mon has
+    // re-entered (switchCount > 1). Its speVersion is preserved on the reused
+    // record, so the version checks below still hold. Each side matches
+    // independently (exact ident, or species on a re-entered mon).
+    const oursMatch =
+      ev[`${ourSideId}Ident`] === ours?.ident ||
+      (ours?.switchCount > 1 && ev[`${ourSideId}Species`] === ours?.species);
+    const theirsMatch =
+      ev[`${theirSideId}Ident`] === theirs?.ident ||
+      (theirs?.switchCount > 1 && ev[`${theirSideId}Species`] === theirs?.species);
+    if (!oursMatch || !theirsMatch) continue;
     if (ev.ver[ourSideId] !== ours?.speVersion || ev.ver[theirSideId] !== theirs?.speVersion) continue;
     if (ev.ver.field !== (state?.field?.speVersion ?? 0)) continue;
     if (ev.ver.side1 !== (state?.sides?.p1?.speVersion ?? 0)) continue;
@@ -213,13 +247,18 @@ export function speedLine(ours, theirs, gen, state, ourSideId) {
     }
     return `Their ${theirs?.species} holds Lagging Tail — you move first regardless of Speed.`;
   }
+  // A range narrowed by the species-keyed speed memory (a mon that left and
+  // came back) deserves a note so the reader knows the figure is remembered,
+  // not freshly revealed.
+  const remembered = oursRange.source === 'memory' || theirsRange.source === 'memory';
+  const rem = remembered ? ' (speed remembered from earlier trades)' : '';
   if (order.weMoveFirst === true) {
     const obs = observed ? ' — observed: you moved first when you last traded moves' : '';
-    return `You outspeed their ${theirs?.species} (${fmt(oursRange)} vs ${fmt(theirsRange)}) — you move first${obs}${tr}.`;
+    return `You outspeed their ${theirs?.species} (${fmt(oursRange)} vs ${fmt(theirsRange)}) — you move first${obs}${tr}${rem}.`;
   }
   if (order.weMoveFirst === false) {
     const obs = observed ? ' — observed: it moved first when you last traded moves' : '';
-    return `Their ${theirs?.species} outspeeds you (${fmt(theirsRange)} vs ${fmt(oursRange)}) — they move first${obs}${tr}.`;
+    return `Their ${theirs?.species} outspeeds you (${fmt(theirsRange)} vs ${fmt(oursRange)}) — they move first${obs}${tr}${rem}.`;
   }
-  return `Speed is close (you ${fmt(oursRange)}, them ${fmt(theirsRange)})${trickRoom ? ' — Trick Room is active (slower moves first)' : ' — order could go either way'}.`;
+  return `Speed is close (you ${fmt(oursRange)}, them ${fmt(theirsRange)})${trickRoom ? ' — Trick Room is active (slower moves first)' : ' — order could go either way'}${rem}.`;
 }

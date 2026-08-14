@@ -15,6 +15,7 @@ import {
   getSide,
   addMove,
   updateHp,
+  rememberSpeed,
 } from './state.js';
 import { parseLine } from './parser.js';
 import { displayMoveName, displayAbilityName, displayItemName } from './movenames.js';
@@ -38,6 +39,19 @@ const SPEED_ITEMS = new Set([
 const CHOICE_ITEMS = new Set(['choiceband', 'choicespecs', 'choicescarf']);
 
 const toID = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+// The mon's EXACT base Speed, or null when unknown. Called only when every
+// speed version is 0 (no modifiers anywhere), so stats.spe / statsEffective
+// / a point speedRange all equal the base Speed. A non-point speedRange (an
+// EV range from a hover tooltip) is not exact and yields null.
+function exactBaseSpeed(mon) {
+  if (mon.statsEffective?.spe != null) return mon.statsEffective.spe;
+  if (mon.stats?.spe != null) return mon.stats.spe;
+  if (mon.speedRange?.min != null && mon.speedRange.min === mon.speedRange.max) {
+    return mon.speedRange.min;
+  }
+  return null;
+}
 
 // Priority data the calc is missing (Grassy Glide is +1 priority, but only in
 // Grassy Terrain — the calc table doesn't record it).
@@ -415,11 +429,14 @@ export class BattleReader {
     if (!a || !b) return;
     const fasterSide = moves.indexOf(p1) < moves.indexOf(p2) ? 'p1' : 'p2';
     const clean = movePriority(state.gen, p1.move) === movePriority(state.gen, p2.move);
+    const turn = p1.turn ?? p2.turn ?? state.turn;
     state.speedEvidence.push({
-      turn: p1.turn ?? p2.turn ?? state.turn,
+      turn,
       fasterSide,
       p1Ident: p1.ident,
       p2Ident: p2.ident,
+      p1Species: a.species,
+      p2Species: b.species,
       p1Move: p1.move,
       p2Move: p2.move,
       clean,
@@ -432,6 +449,25 @@ export class BattleReader {
         side2: state.sides.p2.speVersion ?? 0,
       },
     });
+    // Species-keyed speed memory: when the pair traded moves with NO speed
+    // modifiers in play anywhere (all speVersions 0), effective Speed equals
+    // base Speed, so the observed order pins down a rough bound on the other
+    // mon's base Speed. Because equal Speeds tie-break randomly, "moved
+    // first" against a known-S mon only proves ≤ S (or ≥ S), never strict.
+    // The bounds persist across switch-outs (species-keyed), so a mon that
+    // leaves and comes back keeps "roughly how fast it might be".
+    const modsInPlay =
+      a.speVersion !== 0 || b.speVersion !== 0 ||
+      state.field.speVersion !== 0 ||
+      state.sides.p1.speVersion !== 0 || state.sides.p2.speVersion !== 0;
+    if (clean && !modsInPlay) {
+      const faster = fasterSide === 'p1' ? a : b;
+      const slower = fasterSide === 'p1' ? b : a;
+      const fSpe = exactBaseSpeed(faster);
+      const sSpe = exactBaseSpeed(slower);
+      if (fSpe != null) rememberSpeed(state, slower.side, slower.species, { max: fSpe }, turn);
+      if (sSpe != null) rememberSpeed(state, faster.side, faster.species, { min: sSpe }, turn);
+    }
     if (state.speedEvidence.length > 30) {
       state.speedEvidence.splice(0, state.speedEvidence.length - 30);
     }
