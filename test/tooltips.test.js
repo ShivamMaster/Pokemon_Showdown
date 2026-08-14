@@ -31,6 +31,40 @@ test('parseTooltipText reads species, labels, and moves with PP', () => {
   assert.deepEqual(obs.moves, [{ name: 'Dragon Pulse', pp: 15, maxpp: 16 }]);
 });
 
+test('parseTooltipText reads the opponent Spe range (min–ev0–ev252–max)', () => {
+  const obs = parseTooltipText(REAL_TOOLTIP);
+  // "Spe 139–186–249–273 / (before external modifiers)" — the opponent's
+  // tooltip shows their exact EV/nature speed bounds, not exact stats.
+  assert.deepEqual(obs.speedRange, { min: 139, max: 273 });
+  assert.equal(obs.stats, undefined);
+});
+
+test('parseTooltipText reads the exact stat line for our own Pokémon', () => {
+  // The client shows raw stats (EVs + nature) for our own mons. This is the
+  // tooltip text as rendered from the client's markup (innerText).
+  const obs = parseTooltipText(
+    `Dragonite\n\nHP: 100/100\n\nAbility: Multiscale\n\nItem: Leftovers\n\nAtk 147 / Def 100 / SpA 70 / SpD 80 / Spe 122\n\n• Outrage (10/10)`
+  );
+  assert.deepEqual(obs.stats, { atk: 147, def: 100, spa: 70, spd: 80, spe: 122 });
+  assert.equal(obs.statsEffective, undefined);
+});
+
+test('parseTooltipText reads the boosted "(After stat modifiers:)" line', () => {
+  // With a +1 Speed stage the client adds a second, modified stat line.
+  const obs = parseTooltipText(
+    `Dragonite\n\nHP: 100/100\n\nAtk 147 / Def 100 / SpA 70 / SpD 80 / Spe 122\n(After stat modifiers:)\nAtk 147 / Def 100 / SpA 70 / SpD 80 / Spe 183`
+  );
+  assert.deepEqual(obs.stats, { atk: 147, def: 100, spa: 70, spd: 80, spe: 122 });
+  assert.deepEqual(obs.statsEffective, { atk: 147, def: 100, spa: 70, spd: 80, spe: 183 });
+});
+
+test('parseTooltipText handles OCR-dash noise in the Spe range', () => {
+  const obs = parseTooltipText('Spe 100-122 (before external modifiers)');
+  assert.deepEqual(obs.speedRange, { min: 100, max: 122 });
+  const obs2 = parseTooltipText('Spe 100 to 122');
+  assert.deepEqual(obs2.speedRange, { min: 100, max: 122 });
+});
+
 test('parseTooltipText handles a normal item, tera type, and no-PP moves', () => {
   const obs = parseTooltipText(
     `Togekiss

@@ -5,6 +5,7 @@
 // extension's content script, so it is written as a per-event state machine
 // rather than a one-shot regex over the whole log.
 
+import { MOVES } from '@smogon/calc';
 import {
   BOOST_STATS,
   STATUS_CODES,
@@ -21,6 +22,26 @@ import { displayMoveName, displayAbilityName, displayItemName } from './movename
 // Moves that force the user to switch after use (Volt Switch etc.). A switch
 // immediately after one of these is treated as forced, not a free choice.
 const PIVOT_MOVES = new Set(['Volt Switch', 'U-turn', 'Flip Turn', 'Teleport', 'Parting Shot']);
+
+// Speed-relevant item names — revealing/consuming them changes the speed
+// relationship, so speed evidence taken before must be discarded.
+const SPEED_ITEMS = new Set(['Choice Scarf', 'Iron Ball']);
+
+// Priority data the calc is missing (Grassy Glide is +1 priority, but only in
+// Grassy Terrain — the calc table doesn't record it).
+const PRIORITY_OVERRIDES = { 'Grassy Glide': 1 };
+
+// How fast a move acts, for deciding whether a same-turn move pair reveals
+// anything about raw Speed: if both moves share a priority tier, Speed decided
+// who acted first; otherwise priority did and the pair is useless evidence.
+export function movePriority(gen, moveName) {
+  if (PRIORITY_OVERRIDES[moveName] != null) return PRIORITY_OVERRIDES[moveName];
+  try {
+    return MOVES[gen]?.[moveName]?.priority ?? 0;
+  } catch {
+    return 0;
+  }
+}
 
 // These abilities appear as `-end|ident|Ability` lines when they wear off,
 // which is the only way their name shows up in the log.
@@ -72,6 +93,7 @@ export class BattleReader {
     this.state = createBattleState();
     this._lastMoveBySide = { p1: null, p2: null };
     this._lastSwitchWasPivot = { p1: false, p2: false };
+    this._turnMoves = []; // |move| lines of the current turn, in resolution order
   }
 
   applyLine(line) {
@@ -98,6 +120,7 @@ export class BattleReader {
     this.state = createBattleState();
     this._lastMoveBySide = { p1: null, p2: null };
     this._lastSwitchWasPivot = { p1: false, p2: false };
+    this._turnMoves = [];
   }
 
   read(text) {
@@ -166,6 +189,9 @@ export class BattleReader {
         for (const side of [this.state.sides.p1, this.state.sides.p2]) {
           for (const m of side.pokemon) m.justSwitchedIn = false;
         }
+        // The turn just ended: if both sides used a move, the order they were
+        // resolved in reveals who is faster. Record that as speed evidence.
+        this._recordSpeedEvidence();
         break;
       case 'win':
         this.state.winner = args[0] ?? null;
@@ -223,6 +249,8 @@ export class BattleReader {
         break;
       case 'weather':
         this.state.field.weather = args[0] === 'none' ? null : (args[0] ?? null);
+        // Weather switches speed abilities (Swift Swim, Chlorophyll, …) on/off.
+        this.state.field.speVersion += 1;
         break;
       case 'fieldstart':
       case 'fieldend':
@@ -338,7 +366,50 @@ export class BattleReader {
     const sideId = sideOf(ident);
     this._lastMoveBySide[sideId] = { move: moveName, ident, target, flags: event.args.slice(2) };
     if (PIVOT_MOVES.has(moveName)) this._lastSwitchWasPivot[sideId] = true;
+    // The log emits moves in resolution order, so this turn's move list is
+    // itself the speed evidence: whoever appears first acted first.
+    this._turnMoves.push({ ident, move: moveName, sideId, turn: this.state.turn });
     this._recordAction('move', sideId, ident, { move: moveName, target });
+  }
+
+  // After a turn completes, if both sides used a move, record who acted first
+  // as observed speed evidence — but only when both moves share a priority
+  // tier (otherwise priority, not Speed, decided the order).
+  _recordSpeedEvidence() {
+    const state = this.state;
+    const moves = this._turnMoves;
+    this._turnMoves = [];
+    if (moves.length < 2) return;
+    // Doubles/multi battles interleave four+ moves; the pairing is ambiguous.
+    if (state.gametype && state.gametype !== 'singles') return;
+    const p1 = moves.find((m) => m.sideId === 'p1');
+    const p2 = moves.find((m) => m.sideId === 'p2');
+    if (!p1 || !p2) return;
+    const a = getPokemon(state, p1.ident);
+    const b = getPokemon(state, p2.ident);
+    if (!a || !b) return;
+    const fasterSide = moves.indexOf(p1) < moves.indexOf(p2) ? 'p1' : 'p2';
+    const clean = movePriority(state.gen, p1.move) === movePriority(state.gen, p2.move);
+    state.speedEvidence.push({
+      turn: p1.turn ?? p2.turn ?? state.turn,
+      fasterSide,
+      p1Ident: p1.ident,
+      p2Ident: p2.ident,
+      p1Move: p1.move,
+      p2Move: p2.move,
+      clean,
+      trickRoom: !!state.field.effects['Trick Room'],
+      ver: {
+        p1: a.speVersion,
+        p2: b.speVersion,
+        field: state.field.speVersion ?? 0,
+        side1: state.sides.p1.speVersion ?? 0,
+        side2: state.sides.p2.speVersion ?? 0,
+      },
+    });
+    if (state.speedEvidence.length > 30) {
+      state.speedEvidence.splice(0, state.speedEvidence.length - 30);
+    }
   }
 
   // `|-crit|ident` right after a move — the calc can't predict crit damage,
@@ -403,11 +474,14 @@ export class BattleReader {
     const ident = event.args[0];
     const mon = getPokemon(this.state, ident);
     if (!mon) return;
+    const wasPar = mon.status === 'par';
     if (event.type === 'status') {
       if (event.args[1]) mon.status = event.args[1];
     } else if (!event.args[1] || mon.status === event.args[1]) {
       mon.status = null;
     }
+    // Paralysis halves Speed — entering or leaving it changes the order.
+    if (wasPar !== (mon.status === 'par')) mon.speVersion += 1;
     this._recordAction(event.type, sideOf(ident), ident, { status: mon.status });
   }
 
@@ -432,6 +506,8 @@ export class BattleReader {
         for (const s of BOOST_STATS) mon.boosts[s] = 0;
         break;
     }
+    // A Speed-stage change alters who moves first — invalidate speed evidence.
+    if (stat === 'spe' || event.type === 'clearboost') mon.speVersion += 1;
   }
 
   _applyItem(event) {
@@ -442,6 +518,7 @@ export class BattleReader {
     mon.item = item;
     mon.itemRevealed = true;
     mon.itemConsumed = event.type === 'enditem';
+    if (SPEED_ITEMS.has(item)) mon.speVersion += 1;
   }
 
   _applyAbility(event) {
@@ -450,7 +527,11 @@ export class BattleReader {
     if (!mon) return;
     let ability = event.args[1];
     if (ability?.startsWith('ability:')) ability = ability.slice('ability:'.length).trim();
-    if (ability) mon.ability = ability;
+    if (!ability || ability === mon.ability) return;
+    mon.ability = ability;
+    // Abilities decide the speed equation (Swift Swim, Chlorophyll, …) —
+    // conservative: any ability reveal invalidates prior speed evidence.
+    mon.speVersion += 1;
   }
 
   _applyActivate(event) {
@@ -485,12 +566,18 @@ export class BattleReader {
       if (effect.endsWith('Terrain')) this.state.field.terrain = null;
       else delete this.state.field.effects[effect];
     }
+    // Terrain and Trick Room both change the speed equation (Surge Surfer,
+    // Grassy Glide, and who moves first under Trick Room).
+    if (effect.endsWith('Terrain') || effect === 'Trick Room') {
+      this.state.field.speVersion += 1;
+    }
     this._revealAbilityFromExtras(event.args.slice(1));
   }
 
   _applyFieldActivate(event) {
     const effect = (event.args[0] ?? '').replace(/^move:\s*/, '');
     this.state.field.effects[effect] = (this.state.field.effects[effect] ?? 0) + 1;
+    if (effect === 'Trick Room') this.state.field.speVersion += 1;
     this._revealAbilityFromExtras(event.args.slice(1));
   }
 
@@ -505,6 +592,8 @@ export class BattleReader {
     } else {
       delete side.effects[effect];
     }
+    // Tailwind doubles that side's Speed — evidence taken before it started is stale.
+    if (effect === 'Tailwind') side.speVersion += 1;
   }
 
   _applyRequest(jsonStr) {
@@ -552,6 +641,16 @@ export class BattleReader {
         const hp = parseHp(p.condition);
         if (hp && hp.cur != null) updateHp(mon, hp);
       }
+      // The request carries our exact stats (EVs + nature, no boosts/status/
+      // items) for every team member — Speed becomes a point, not a range.
+      if (p.stats && typeof p.stats === 'object') {
+        const stats = {};
+        for (const k of ['atk', 'def', 'spa', 'spd', 'spe']) {
+          const v = Number(p.stats[k]);
+          if (Number.isFinite(v)) stats[k] = v;
+        }
+        if (Object.keys(stats).length === 5) mon.stats = stats;
+      }
       if (p.active) {
         mon.active = true;
         // Don't touch side.active here: switch lines own the active-slot
@@ -597,7 +696,7 @@ export class BattleReader {
   applyObservation(identOrMon, obs = {}) {
     const mon = typeof identOrMon === 'string' ? getPokemon(this.state, identOrMon) : identOrMon;
     if (!mon) return null;
-    const changes = { moves: [], pp: [], item: false, ability: false, tera: false };
+    const changes = { moves: [], pp: [], item: false, ability: false, tera: false, stats: false, statsEffective: false, speedRange: false };
     for (const m of obs.moves ?? []) {
       if (!m?.name) continue;
       if (!mon.moves.includes(m.name)) {
@@ -624,6 +723,21 @@ export class BattleReader {
       mon.teraType = obs.teraType;
       changes.tera = true;
     }
+    // Exact stats from our hover tooltip / live request data: the raw line
+    // (no boosts/status/items) and the "(After stat modifiers:)" line (all
+    // modifiers baked in). The opponent's tooltip instead shows a Spe range.
+    if (obs.stats && typeof obs.stats === 'object' && Object.keys(obs.stats).length >= 5) {
+      mon.stats = { ...obs.stats };
+      changes.stats = true;
+    }
+    if (obs.statsEffective && typeof obs.statsEffective === 'object' && Object.keys(obs.statsEffective).length >= 5) {
+      mon.statsEffective = { ...obs.statsEffective };
+      changes.statsEffective = true;
+    }
+    if (obs.speedRange && Number.isFinite(obs.speedRange.min) && Number.isFinite(obs.speedRange.max)) {
+      mon.speedRange = { min: obs.speedRange.min, max: obs.speedRange.max };
+      changes.speedRange = true;
+    }
     if (obs.hpText) {
       const m = /^(\d+(?:\.\d+)?)%$/.exec(String(obs.hpText).trim());
       if (m && mon.hpPercent == null) {
@@ -635,7 +749,8 @@ export class BattleReader {
     }
     const changed =
       changes.moves.length > 0 || changes.pp.length > 0 ||
-      changes.item || changes.ability || changes.tera;
+      changes.item || changes.ability || changes.tera ||
+      changes.stats || changes.statsEffective || changes.speedRange;
     if (changed) {
       mon.observed = true;
       this._recordAction('observed', mon.side, mon.ident, { species: mon.species, ...changes });

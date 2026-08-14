@@ -550,3 +550,30 @@ test('recommend warns about a specific hidden-move threat', () => {
   assert.ok(threat, `expected a hidden-threat warning, got: ${JSON.stringify(rec.reasoning)}`);
   assert.ok(!threat.includes('Mortal Spin'), 'revealed moves must not appear as hidden threats');
 });
+
+test('recommend uses observed move order to resolve a close speed matchup', () => {
+  // Raging Bolt (base 85) vs Great Tusk (base 85) — identical ranges, so the
+  // engine would normally hedge "Speed is close". But the log showed Great
+  // Tusk acting first, and nothing speed-affecting has changed since.
+  const state = makeState({
+    ourActive: { species: 'Raging Bolt', moves: ['Thunderclap', 'Dragon Pulse'] },
+    theirActive: { species: 'Great Tusk', moves: ['Earthquake', 'Ice Spinner'] },
+  });
+  const ours = state.sides.p1.pokemon[0];
+  const theirs = state.sides.p2.pokemon[0];
+  state.speedEvidence.push({
+    turn: 1,
+    fasterSide: 'p2',
+    p1Ident: ours.ident,
+    p2Ident: theirs.ident,
+    p1Move: 'Dragon Pulse',
+    p2Move: 'Earthquake',
+    clean: true,
+    trickRoom: false,
+    ver: { p1: 0, p2: 0, field: 0, side1: 0, side2: 0 },
+  });
+  const rec = recommend(state, { ourSideId: 'p1' });
+  const line = rec.reasoning.find((r) => r.includes('outspeeds'));
+  assert.ok(line, `expected an observed speed line, got: ${JSON.stringify(rec.reasoning)}`);
+  assert.match(line, /observed: it moved first when you last traded moves/);
+});

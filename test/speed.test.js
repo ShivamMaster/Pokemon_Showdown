@@ -8,6 +8,7 @@ import {
   effectiveSpeedRange,
   speedOrder,
   speedLine,
+  findSpeedEvidence,
 } from '../src/engine/speed.js';
 import {
   evaluateMove,
@@ -112,6 +113,57 @@ test('speed: unknown species yields a zero range instead of crashing', () => {
   assert.deepEqual(r, { min: 0, max: 0 });
 });
 
+test('speed: exact raw stats make the range a point and modifiers still apply', () => {
+  const state = baseState();
+  const mon = makeMon('Raging Bolt');
+  mon.stats = { atk: 120, def: 100, spa: 150, spd: 100, spe: 165 }; // exact EVs+nature
+  const r = effectiveSpeedRange(9, mon, state, 'p1');
+  assert.deepEqual(r, { min: 165, max: 165 });
+  // A +1 Speed stage still applies on top of the exact raw stat.
+  mon.boosts.spe = 1;
+  assert.deepEqual(effectiveSpeedRange(9, mon, state, 'p1'), { min: Math.round(165 * 1.5), max: Math.round(165 * 1.5) });
+});
+
+test('speed: fully-modified stats are used as-is (no double application)', () => {
+  const state = baseState();
+  const mon = makeMon('Raging Bolt', { boosts: { spe: 1 } });
+  mon.status = 'par';
+  // The tooltip "(After stat modifiers:)" value already includes the boost AND
+  // the paralysis halving — the engine must not apply either again.
+  mon.statsEffective = { atk: 120, def: 100, spa: 150, spd: 100, spe: 124 };
+  assert.deepEqual(effectiveSpeedRange(9, mon, state, 'p1'), { min: 124, max: 124 });
+});
+
+test('speed: the opponent hover Spe range is used as the base', () => {
+  const state = baseState();
+  const mon = makeMon('Raging Bolt');
+  mon.speedRange = { min: 139, max: 273 }; // real tooltip bounds (before modifiers)
+  assert.deepEqual(effectiveSpeedRange(9, mon, state, 'p1'), { min: 139, max: 273 });
+  // Modifiers still apply on top (e.g. Choice Scarf).
+  mon.item = 'Choice Scarf';
+  mon.itemRevealed = true;
+  const r = effectiveSpeedRange(9, mon, state, 'p1');
+  assert.equal(r.min, Math.round(139 * 1.5));
+  assert.equal(r.max, Math.round(273 * 1.5));
+});
+
+test('speed: Iron Ball halves speed', () => {
+  const state = baseState();
+  const iron = makeMon('Raging Bolt', { item: 'Iron Ball' });
+  const r = effectiveSpeedRange(9, iron, state, 'p1');
+  assert.equal(r.min, Math.round(186 * 0.5));
+  assert.equal(r.max, Math.round(273 * 0.5));
+});
+
+test('speed: exact stat + Iron Ball = point', () => {
+  const state = baseState();
+  const mon = makeMon('Raging Bolt');
+  mon.stats = { atk: 120, def: 100, spa: 150, spd: 100, spe: 165 };
+  mon.item = 'Iron Ball';
+  mon.itemRevealed = true;
+  assert.deepEqual(effectiveSpeedRange(9, mon, state, 'p1'), { min: Math.round(165 * 0.5), max: Math.round(165 * 0.5) });
+});
+
 // ---------------------------------------------------------------------------
 // speedOrder decisiveness
 // ---------------------------------------------------------------------------
@@ -148,6 +200,90 @@ test('speed: a boost can turn an overlap into a decisive edge', () => {
   assert.equal(speedOrder(boosted, makeMon('Iron Treads'), 9, state, 'p1').weMoveFirst, true);
 });
 
+test('speed: observed move order resolves an overlapping range matchup', () => {
+  const state = baseState();
+  const ours = makeMon('Raging Bolt');   // base 85
+  const theirs = makeMon('Great Tusk');  // base 85 — identical ranges
+  // Ranges overlap, so without evidence the order is unknown…
+  assert.equal(speedOrder(ours, theirs, 9, state, 'p1').weMoveFirst, null);
+  // …but the log showed Great Tusk (p2) acting first: that observation wins.
+  state.speedEvidence.push({
+    turn: 1,
+    fasterSide: 'p2',
+    p1Ident: ours.ident,
+    p2Ident: theirs.ident,
+    p1Move: 'Dragon Pulse',
+    p2Move: 'Earthquake',
+    clean: true,
+    trickRoom: false,
+    ver: { p1: 0, p2: 0, field: 0, side1: 0, side2: 0 },
+  });
+  const order = speedOrder(ours, theirs, 9, state, 'p1');
+  assert.equal(order.weMoveFirst, false);
+  assert.equal(order.observed, true);
+  assert.ok(findSpeedEvidence(state, ours, theirs, 'p1'));
+});
+
+test('speed: evidence is ignored when anything speed-affecting changed since', () => {
+  // Fresh mons per case so the recorded versions always match the evidence.
+  const fresh = () => [makeMon('Raging Bolt'), makeMon('Great Tusk')];
+  const push = (state, ours, theirs, mutate) => {
+    state.speedEvidence.push({
+      turn: 1,
+      fasterSide: 'p2',
+      p1Ident: ours.ident,
+      p2Ident: theirs.ident,
+      p1Move: 'Dragon Pulse',
+      p2Move: 'Earthquake',
+      clean: true,
+      trickRoom: false,
+      ver: { p1: 0, p2: 0, field: 0, side1: 0, side2: 0 },
+    });
+    mutate();
+    return speedOrder(ours, theirs, 9, state, 'p1');
+  };
+  // A Speed boost on either mon invalidates the observation.
+  let state = baseState();
+  let [ours, theirs] = fresh();
+  let order = push(state, ours, theirs, () => { ours.boosts.spe = 1; ours.speVersion += 1; });
+  assert.equal(order.observed, false);
+  assert.equal(order.weMoveFirst, null);
+  // A weather change (Swift Swim/Chlorophyll toggle) invalidates it too.
+  state = baseState();
+  [ours, theirs] = fresh();
+  order = push(state, ours, theirs, () => { state.field.weather = 'RainDance'; state.field.speVersion += 1; });
+  assert.equal(order.observed, false);
+  // An unrelated change (e.g. Reflect on our side) does not.
+  state = baseState();
+  [ours, theirs] = fresh();
+  order = push(state, ours, theirs, () => { state.sides.p1.effects.Reflect = 1; });
+  assert.equal(order.observed, true);
+  assert.equal(order.weMoveFirst, false);
+});
+
+test('speed: observed order also wins under Trick Room', () => {
+  const state = baseState();
+  state.field.effects['Trick Room'] = 1;
+  state.field.speVersion += 1;
+  const ours = makeMon('Ferrothorn');
+  const theirs = makeMon('Deoxys-Speed');
+  // Under Trick Room the log showed Ferrothorn (p1) acting first (it's slower).
+  state.speedEvidence.push({
+    turn: 1,
+    fasterSide: 'p1',
+    p1Ident: ours.ident,
+    p2Ident: theirs.ident,
+    p1Move: 'Gyro Ball',
+    p2Move: 'Psycho Boost',
+    clean: true,
+    trickRoom: true,
+    ver: { p1: 0, p2: 0, field: 1, side1: 0, side2: 0 },
+  });
+  const order = speedOrder(ours, theirs, 9, state, 'p1');
+  assert.equal(order.weMoveFirst, true, 'the slower mon acts first under Trick Room');
+  assert.equal(order.observed, true);
+});
+
 // ---------------------------------------------------------------------------
 // speedLine text
 // ---------------------------------------------------------------------------
@@ -166,6 +302,30 @@ test('speed: line text covers all three outcomes', () => {
     speedLine(makeMon('Raging Bolt'), makeMon('Iron Treads'), 9, state, 'p1'),
     /Speed is close/
   );
+});
+
+test('speed: line text says when the order was observed and shows points', () => {
+  const state = baseState();
+  const ours = makeMon('Raging Bolt');
+  const theirs = makeMon('Great Tusk');
+  ours.stats = { atk: 120, def: 100, spa: 150, spd: 100, spe: 165 };
+  theirs.speedRange = { min: 139, max: 273 };
+  state.speedEvidence.push({
+    turn: 1,
+    fasterSide: 'p2',
+    p1Ident: ours.ident,
+    p2Ident: theirs.ident,
+    p1Move: 'Dragon Pulse',
+    p2Move: 'Earthquake',
+    clean: true,
+    trickRoom: false,
+    ver: { p1: 0, p2: 0, field: 0, side1: 0, side2: 0 },
+  });
+  const line = speedLine(ours, theirs, 9, state, 'p1');
+  assert.match(line, /Their Great Tusk outspeeds you/);
+  assert.match(line, /observed: it moved first when you last traded moves/);
+  // Point ranges render as a single number, not "165-165".
+  assert.match(line, /vs 165\)/);
 });
 
 // ---------------------------------------------------------------------------

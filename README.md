@@ -401,10 +401,25 @@ and factors the outcome into the advice:
   nature) because the opponent's investment isn't visible. When the ranges
   don't overlap, the engine says who moves first with certainty; overlapping
   ranges are reported honestly as “could go either way.”
+- **Your own Speed is exact, not a range** — the live `|request|` carries
+  your team's true stats (EVs + nature), and hovering your active Pokémon
+  shows them too (raw + an “(After stat modifiers:)” line with boosts,
+  paralysis, items, weather, and Tailwind baked in). The engine uses the
+  exact value, and the panel renders it as a point (`165`) instead of
+  `165-165`.
+- **Observed move order beats the guess.** When both sides use a move in the
+  same turn, the log's resolution order reveals who is faster. If the moves
+  share a priority tier (a priority move like Sucker Punch doesn't count —
+  priority, not Speed, decided the order), the engine records it and, until
+  anything speed-affecting changes (Speed boosts, paralysis, Choice
+  Scarf/Iron Ball, weather, Tailwind, Trick Room, a switch), reports the
+  order as observed: “it moved first when you last traded moves.”
+- The opponent's hover tooltip shows their **exact Spe range**
+  (`Spe 139–186–249–273`), which replaces the engine's generic estimate.
 - The reader's known modifiers are applied: **boost stages**, **paralysis**
-  (halved), **Choice Scarf** (while held), weather-based abilities (Swift
-  Swim in rain, Chlorophyll in sun, …), **Tailwind** per side, and **Trick
-  Room** (which flips the comparison).
+  (halved), **Choice Scarf** (×1.5) / **Iron Ball** (×0.5) while held,
+  weather-based abilities (Swift Swim in rain, Chlorophyll in sun, …),
+  **Tailwind** per side, and **Trick Room** (which flips the comparison).
 - In move evaluation: going for a KO while outspeeding gets a bonus; a move
   that risks being KO'd before it lands (they outspeed and can KO) is
   penalized and called out.

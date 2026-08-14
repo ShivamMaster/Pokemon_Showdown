@@ -18,6 +18,7 @@ export function createBattleState() {
       weather: null,   // 'RainDance' | 'SunnyDay' | ... | null
       terrain: null,   // 'Grassy Terrain' | ... | null
       effects: {},     // generic field-wide effects (Trick Room, ...) name -> count
+      speVersion: 0,   // bumped on speed-relevant field changes (weather, terrain, Trick Room)
     },
     // Chronological record of meaningful actions (moves, switches, faints, ...)
     // with the turn they happened in — the raw material for opponent profiling.
@@ -28,6 +29,12 @@ export function createBattleState() {
     observations: [],
     // Index into `observations` already consumed by the stat estimator.
     obsProcessed: 0,
+    // Speed evidence: when both sides use a move in the same turn, the log's
+    // resolution order reveals who is faster. Each entry records who acted
+    // first plus the "speed versions" of everything involved, so the engine
+    // can tell whether the observation is still valid (nothing speed-affecting
+    // changed since). Bounded; side-agnostic (p1/p2 keys, no "our" concept).
+    speedEvidence: [],
   };
 }
 
@@ -40,6 +47,7 @@ export function createSide(sideId) {
     pokemon: [],  // battle records, one per ident that appeared
     active: [],   // idents currently on the field (usually one in singles)
     effects: {},  // side effects (Stealth Rock, Spikes, Reflect, ...) name -> count
+    speVersion: 0, // bumped on speed-relevant side-effect changes (Tailwind)
   };
 }
 
@@ -76,6 +84,10 @@ export function createPokemon({ ident, side, species, gender, level }) {
     forcedSwitchIns: 0,       // times it was forced in (drag / pivoting user)
     justSwitchedIn: false,    // switched in this turn — cleared on the next |turn|
     evEstimate: null,         // back-calculated EV ranges: { atk:[lo,hi], spa:[lo,hi], def:[lo,hi], spd:[lo,hi], hp:[lo,hi] } in EV points, or null
+    speVersion: 0,            // bumped on speed-affecting changes (spe boosts, paralysis, scarf, abilities)
+    stats: null,              // exact current stats from the live request / our hover tooltip: { atk, def, spa, spd, spe } (no boosts/status/items)
+    statsEffective: null,     // same, after stat modifiers (hover tooltip "(After stat modifiers:)" line): all modifiers baked in
+    speedRange: null,         // opponent's shown Spe range from their hover tooltip: { min, max } (EV/nature only)
   };
 }
 

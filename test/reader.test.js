@@ -335,6 +335,98 @@ test('handcrafted: item reveal, status cure, boost clamp, weather', () => {
   assert.equal(s.winner, 'Me');
 });
 
+// ---------------------------------------------------------------------------
+// Speed evidence (same-turn move order) and speed versions
+// ---------------------------------------------------------------------------
+
+test('speed evidence: a same-turn move pair records who acted first', () => {
+  const s = parseLog(
+    '|player|p1|Me\n|player|p2|Rival\n|gametype|singles\n|gen|9\n' +
+    '|switch|p1a: Deoxys-Speed|Deoxys-Speed|100/100\n|switch|p2a: Ferrothorn|Ferrothorn|100/100\n' +
+    '|turn|1\n|move|p1a: Deoxys-Speed|Psycho Boost|p2a: Ferrothorn\n|move|p2a: Ferrothorn|Gyro Ball|p1a: Deoxys-Speed\n|upkeep\n|turn|2\n'
+  );
+  assert.equal(s.speedEvidence.length, 1);
+  const ev = s.speedEvidence[0];
+  assert.equal(ev.turn, 1);
+  assert.equal(ev.fasterSide, 'p1', 'Deoxys-Speed acted first in the log');
+  assert.equal(ev.p1Ident, 'p1a: Deoxys-Speed');
+  assert.equal(ev.p2Ident, 'p2a: Ferrothorn');
+  assert.equal(ev.clean, true); // both moves are priority 0
+  assert.equal(ev.trickRoom, false);
+});
+
+test('speed evidence: a priority move makes the pair unclean (no speed info)', () => {
+  const s = parseLog(
+    '|player|p1|Me\n|player|p2|Rival\n|gametype|singles\n|gen|9\n' +
+    '|switch|p1a: Arcanine|Arcanine|100/100\n|switch|p2a: Snorlax|Snorlax|100/100\n' +
+    '|turn|1\n|move|p2a: Snorlax|Body Slam|p1a: Arcanine\n|move|p1a: Arcanine|Extreme Speed|p2a: Snorlax\n|upkeep\n|turn|2\n'
+  );
+  assert.equal(s.speedEvidence.length, 1);
+  assert.equal(s.speedEvidence[0].clean, false, 'Extreme Speed (prio 2) vs Body Slam (prio 0)');
+});
+
+test('speed evidence: no evidence without two move lines or in doubles', () => {
+  // Only one side moved (the other switched) — nothing to learn.
+  const oneMove = parseLog(
+    '|player|p1|Me\n|player|p2|Rival\n|gametype|singles\n|gen|9\n' +
+    '|switch|p1a: Pikachu|Pikachu|100/100\n|switch|p2a: Gengar|Gengar|100/100\n' +
+    '|turn|1\n|move|p1a: Pikachu|Volt Switch|p2a: Gengar\n|switch|p1a: Snorlax|Snorlax|100/100\n|turn|2\n'
+  );
+  assert.equal(oneMove.speedEvidence.length, 0);
+  // Doubles interleave four moves — the pairing is ambiguous, so skip.
+  const doubles = parseLog(
+    '|player|p1|Me\n|player|p2|Rival\n|gametype|doubles\n|gen|9\n' +
+    '|switch|p1a: Pikachu|Pikachu|100/100\n|switch|p2a: Gengar|Gengar|100/100\n' +
+    '|turn|1\n|move|p1a: Pikachu|Quick Attack|p2a: Gengar\n|move|p2a: Gengar|Shadow Ball|p1a: Pikachu\n|upkeep\n|turn|2\n'
+  );
+  assert.equal(doubles.speedEvidence.length, 0);
+});
+
+test('speed evidence: reset clears evidence and turn moves', () => {
+  const reader = new BattleReader();
+  reader.read(
+    '|player|p1|Me\n|player|p2|Rival\n|gametype|singles\n|gen|9\n' +
+    '|switch|p1a: Deoxys-Speed|Deoxys-Speed|100/100\n|switch|p2a: Ferrothorn|Ferrothorn|100/100\n' +
+    '|turn|1\n|move|p1a: Deoxys-Speed|Psycho Boost|p2a: Ferrothorn\n|move|p2a: Ferrothorn|Gyro Ball|p1a: Deoxys-Speed\n|upkeep\n|turn|2\n'
+  );
+  assert.equal(reader.state.speedEvidence.length, 1);
+  reader.reset();
+  assert.equal(reader.state.speedEvidence.length, 0);
+});
+
+test('speed versions: speed-relevant changes bump the counters', () => {
+  const reader = new BattleReader();
+  reader.applyLine('|player|p1|Me');
+  reader.applyLine('|switch|p1a: Pikachu|Pikachu|100/100');
+  reader.applyLine('|switch|p2a: Gengar|Gengar|100/100');
+  reader.applyLine('|gen|9');
+  const mon = () => reader.state.sides.p1.pokemon[0];
+
+  assert.equal(mon().speVersion, 0);
+  reader.applyLine('|-boost|p1a: Pikachu|spe|1');
+  assert.equal(mon().speVersion, 1, 'a Speed-stage boost invalidates evidence');
+  reader.applyLine('|-boost|p1a: Pikachu|atk|1');
+  assert.equal(mon().speVersion, 1, 'an Attack boost does not');
+  reader.applyLine('|-status|p1a: Pikachu|par');
+  assert.equal(mon().speVersion, 2, 'paralysis invalidates evidence');
+  reader.applyLine('|-item|p1a: Pikachu|Choice Scarf');
+  assert.equal(mon().speVersion, 3, 'a Choice Scarf reveal invalidates evidence');
+  reader.applyLine('|-item|p2a: Gengar|Leftovers');
+  assert.equal(mon().speVersion, 3, 'an unrelated item does not');
+
+  assert.equal(reader.state.field.speVersion, 0);
+  reader.applyLine('|-weather|RainDance');
+  assert.equal(reader.state.field.speVersion, 1, 'weather changes the speed equation');
+  reader.applyLine('|-sidestart|p1: Me|Tailwind');
+  assert.equal(reader.state.sides.p1.speVersion, 1, 'Tailwind invalidates evidence');
+  reader.applyLine('|-sidestart|p1: Me|Reflect');
+  assert.equal(reader.state.sides.p1.speVersion, 1, 'an unrelated side effect does not');
+});
+
+// ---------------------------------------------------------------------------
+// BattleReader can process events incrementally (live mode)
+// ---------------------------------------------------------------------------
+
 test('BattleReader can process events incrementally (live mode)', () => {
   const reader = new BattleReader();
   reader.applyLine('|player|p1|Me|');
@@ -454,6 +546,57 @@ test('applyRequest (parsed object) + switch ident merge: no duplicate records', 
   assert.deepEqual(kg.moves, ['Sucker Punch']);
   assert.equal(kg.item, 'Leftovers');
 });
+
+test('request ingests our exact stats (Speed becomes a point)', () => {
+  const reader = new BattleReader();
+  reader.applyLine(`|gen|9`);
+  reader.applyRequest({
+    side: {
+      name: 'Me',
+      id: 'p1',
+      pokemon: [
+        {
+          ident: 'p1: Dragonite',
+          details: 'Dragonite, M',
+          condition: '100/100',
+          active: true,
+          moves: [],
+          stats: { atk: 165, def: 115, spa: 120, spd: 120, spe: 110 },
+        },
+      ],
+    },
+  });
+  const dn = reader.state.sides.p1.pokemon.find((m) => m.species === 'Dragonite');
+  assert.deepEqual(dn.stats, { atk: 165, def: 115, spa: 120, spd: 120, spe: 110 });
+});
+
+// ---------------------------------------------------------------------------
+// applyObservation merges hover tooltip info into a Pokémon
+// ---------------------------------------------------------------------------
+
+test('applyObservation merges exact stats, effective stats, and Spe range', () => {
+  const reader = new BattleReader();
+  reader.read(realLog);
+  const dn = reader.state.sides.p2.pokemon.find((m) => m.species === 'Dragonite');
+  const changes = reader.applyObservation(dn, {
+    species: 'Dragonite',
+    stats: { atk: 165, def: 115, spa: 120, spd: 120, spe: 110 },
+    statsEffective: { atk: 165, def: 115, spa: 120, spd: 120, spe: 220 },
+    speedRange: { min: 100, max: 110 },
+  });
+  assert.ok(changes, 'stats should count as new information');
+  assert.deepEqual(dn.stats, { atk: 165, def: 115, spa: 120, spd: 120, spe: 110 });
+  assert.deepEqual(dn.statsEffective, { atk: 165, def: 115, spa: 120, spd: 120, spe: 220 });
+  assert.deepEqual(dn.speedRange, { min: 100, max: 110 });
+  // Junk stats never overwrite the stored ones.
+  const noChange = reader.applyObservation(dn, { species: 'Dragonite', stats: { atk: 1 } });
+  assert.equal(noChange, null);
+  assert.deepEqual(dn.stats, { atk: 165, def: 115, spa: 120, spd: 120, spe: 110 });
+});
+
+// ---------------------------------------------------------------------------
+// applyRequest (parsed object) + switch ident merge: no duplicate records
+// ---------------------------------------------------------------------------
 
 test('applyRequest skips unknown items and leaves them unrevealed', () => {
   const reader = new BattleReader();

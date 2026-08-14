@@ -18,12 +18,47 @@ import { getBattle } from './source.js';
 // species is the first line that looks like a Pokémon name (letters/space/
 // .-'), not necessarily the very first line.
 const NAME_LIKE = /^[A-Za-z][A-Za-z .'’-]+$/;
+
+// Stat labels in the tooltip's stat line are the client's short names
+// ("Atk 147 / Def 100 / SpA 70 / SpD 80 / Spe 122"). Gen 1 uses Spc.
+const STAT_KEYS = { Atk: 'atk', Def: 'def', SpA: 'spa', SpD: 'spd', Spe: 'spe', Spc: 'spa' };
+
+// Our own Pokémon's tooltip shows the exact stat line (raw, before stat
+// stages/items/status) when the client has server data for the mon.
+function parseStatsLine(line) {
+  const parts = String(line ?? '').split('/').map((s) => s.trim());
+  if (parts.length < 5) return null;
+  const stats = {};
+  for (const part of parts) {
+    const m = /^(Atk|Def|SpA|SpD|Spe|Spc)\s+(\d+)$/.exec(part);
+    if (!m) return null;
+    stats[STAT_KEYS[m[1]]] = parseInt(m[2], 10);
+  }
+  return Object.keys(stats).length >= 5 ? stats : null;
+}
+
+// The opponent's tooltip shows their Speed range instead of exact stats:
+// "Spe 139–186–249–273 (before external modifiers)" (min–ev0–ev252–max with
+// en-dashes; "to"/"or" appear in some tiers). The endpoints are the real
+// EV/nature bounds, so we take min and max. Best-effort for OCR dash noise.
+function parseSpeRange(line) {
+  const m = /^Spe\s+(.+)$/.exec(String(line ?? '').trim());
+  if (!m) return null;
+  // Drop a trailing parenthetical ("(before external modifiers)") so its
+  // words/numbers can't pollute the stat values.
+  const rest = m[1].replace(/\s*\([^)]*\)\s*$/, '');
+  const nums = (rest.match(/\d+/g) ?? []).map(Number);
+  if (nums.length < 2) return null;
+  return { min: Math.min(...nums), max: Math.max(...nums) };
+}
+
 export function parseTooltipText(text) {
   const lines = String(text ?? '')
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean);
   const obs = { moves: [] };
+  let afterModifiers = false; // next stat line is the boosted "(After stat modifiers:)" one
   for (const line of lines) {
     if (line.startsWith('•') || line.startsWith('*') || line.startsWith('«')) {
       const m = /^[•*«]\s*(.+?)(?:\s*\((\d+)\/(\d+)\))?\s*$/.exec(line);
@@ -34,6 +69,25 @@ export function parseTooltipText(text) {
           maxpp: m[3] != null ? parseInt(m[3], 10) : null,
         });
       }
+      continue;
+    }
+    if (/^\(after stat modifiers/i.test(line)) {
+      afterModifiers = true;
+      continue;
+    }
+    // Exact stat line(s) — ours, from the hover tooltip. The second one
+    // (right after "(After stat modifiers:)") carries boosts/status/items.
+    const stats = parseStatsLine(line);
+    if (stats) {
+      if (afterModifiers) obs.statsEffective = stats;
+      else obs.stats = stats;
+      afterModifiers = false;
+      continue;
+    }
+    // Opponent Speed range ("Spe 139–186–249–273").
+    const speedRange = parseSpeRange(line);
+    if (speedRange) {
+      obs.speedRange = speedRange;
       continue;
     }
     const label = /^([A-Za-z][A-Za-z ]*):\s*(.*)$/.exec(line);
