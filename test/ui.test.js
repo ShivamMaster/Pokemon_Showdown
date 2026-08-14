@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 import { parseLog } from '../src/reader/reader.js';
-import { createPokemon } from '../src/reader/state.js';
+import { createPokemon, addMove } from '../src/reader/state.js';
 import { buildPanelModel, renderPanel, buildPanelHtml, escapeHtml } from '../src/ui/panel.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -211,6 +211,240 @@ test('render: escaping — no raw HTML from battle data', () => {
   assert.equal(escapeHtml('<b>&"\'</b>'), '&lt;b&gt;&amp;&quot;&#39;&lt;/b&gt;');
 });
 
+// ---------------------------------------------------------------------------
+// Active-matchup comparison (our lead vs their lead)
+// ---------------------------------------------------------------------------
+
+test('model: matchup shows both actives with stats and a speed line', () => {
+  const lines = realLog.split('\n');
+  const partial = parseLog(lines.slice(0, lines.indexOf('|turn|2')).join('\n'));
+  const m = buildPanelModel(partial);
+  assert.ok(m.matchup, 'both actives exist at turn 1 — the matchup must render');
+  assert.equal(m.matchup.ours.species, 'Raging Bolt');
+  assert.equal(m.matchup.theirs.species, 'Great Tusk');
+  assert.equal(m.matchup.ours.hpPercent, 7);
+  assert.equal(m.matchup.theirs.hpPercent, 21);
+  // Five stats each (ranges here — a log-only state has no exact request data).
+  assert.deepEqual(m.matchup.ours.stats.map((s) => s.key), ['A', 'D', 'SA', 'SD', 'S']);
+  assert.deepEqual(m.matchup.theirs.stats.map((s) => s.key), ['A', 'D', 'SA', 'SD', 'S']);
+  assert.ok(m.matchup.speed.includes('Speed') || m.matchup.speed.includes('outspeed'));
+});
+
+test('render: stat cells tint green on the side that certainly wins the stat', () => {
+  const lines = realLog.split('\n');
+  const partial = parseLog(lines.slice(0, lines.indexOf('|turn|2')).join('\n'));
+  // Our Raging Bolt: exact stats known (live request). Atk/Def/SpD/Spe are
+  // clearly below Great Tusk's ranges; SpA (160) overlaps 142-205 so it stays
+  // neutral until more is known.
+  partial.sides.p1.pokemon.find((m) => m.species === 'Raging Bolt').stats = {
+    atk: 110, def: 110, spa: 160, spd: 110, spe: 165,
+  };
+  const html = renderPanel(buildPanelModel(partial));
+  const table = html.slice(html.indexOf('<table class="psa-match-table"'), html.indexOf('</table>'));
+  // Their wins are green on their column, ours dimmed (lose).
+  assert.ok(table.includes('psa-match-them-col psa-match-win">21%'), 'HP: their higher % is green');
+  assert.ok(table.includes('psa-match-us-col psa-match-lose">7%'), 'HP: our lower % is dimmed');
+  assert.ok(table.includes('psa-match-them-col psa-match-win">298-361'), 'Atk: their higher range is green');
+  assert.ok(table.includes('psa-match-them-col psa-match-win">210-300'), 'Spe: their higher range is green');
+  // Overlapping range (ours 160 vs theirs 142-205) gets no tint at all.
+  assert.ok(table.includes('psa-match-us-col ">160</td>'), 'SpA overlap stays neutral (no tint)');
+  assert.ok(table.includes('psa-match-them-col ">142-205'), 'their overlapping SpA stays neutral');
+  // The Spe row keeps its highlight on top of the tint.
+  assert.ok(table.includes('psa-match-row-spe'), 'Spe row still highlighted');
+  assert.ok(table.includes('psa-match-row-spe .psa-match-win') || table.includes('psa-match-row-spe'), 'Spe row marker present');
+});
+
+test('model+render: a stat inside the opponent range stays neutral (honest)', () => {
+  const lines = realLog.split('\n');
+  const partial = parseLog(lines.slice(0, lines.indexOf('|turn|2')).join('\n'));
+  // Our exact Atk (300) falls inside their 298-361 range → too close to call.
+  // Our exact Spe (165) is below their 210-300 → a certain loss.
+  partial.sides.p1.pokemon.find((m) => m.species === 'Raging Bolt').stats = {
+    atk: 300, def: 110, spa: 160, spd: 110, spe: 165,
+  };
+  const html = renderPanel(buildPanelModel(partial));
+  const table = html.slice(html.indexOf('<table class="psa-match-table"'), html.indexOf('</table>'));
+  assert.ok(table.includes('psa-match-us-col ">300</td>'), 'Atk inside their range stays neutral');
+  assert.ok(!table.includes('psa-match-us-col psa-match-win">300'), 'no tint for an overlapping exact stat');
+  assert.ok(table.includes('psa-match-us-col psa-match-lose">165'), 'Spe below their range dims ours');
+  assert.ok(table.includes('psa-match-them-col psa-match-win">210-300'), 'their higher Spe tints green');
+});
+
+test('model: type edge — who hits whom super effectively at turn 1', () => {
+  const lines = realLog.split('\n');
+  const partial = parseLog(lines.slice(0, lines.indexOf('|turn|2')).join('\n'));
+  const m = buildPanelModel(partial);
+  const te = m.matchup.typeEdge;
+  assert.ok(te, 'typeEdge is present when both actives exist');
+  // Their revealed Earthquake is 2× against our Electric/Dragon Raging Bolt.
+  assert.deepEqual(te.theirSE, [{ move: 'Earthquake', mult: 2 }]);
+  // Our Dragon Pulse is neutral vs their Ground/Fighting — no SE coverage yet.
+  assert.deepEqual(te.ourSE, []);
+  // Likely-but-unrevealed threats from their learnset.
+  const pot = te.theirPotentialSE.map((x) => x.move);
+  assert.ok(pot.includes('Headlong Rush') && pot.includes('Ice Spinner'), 'potential SE threats listed');
+});
+
+test('model+render: our SE coverage shows up, and tera changes the math', () => {
+  const lines = realLog.split('\n');
+  const partial = parseLog(lines.slice(0, lines.indexOf('|turn|2')).join('\n'));
+  const us = partial.sides.p1.pokemon.find((m) => m.species === 'Raging Bolt');
+  // Ice Beam is 2× vs their Ground/Fighting — our SE coverage appears.
+  us.moves = [...us.moves, 'Ice Beam'];
+  const m = buildPanelModel(partial);
+  assert.deepEqual(m.matchup.typeEdge.ourSE, [{ move: 'Ice Beam', mult: 2 }]);
+  // If we tera to Flying, their Ground moves become immune — but Ice Spinner
+  // (Ice vs Flying = 2×) becomes the hidden threat instead.
+  us.terastallized = true;
+  us.teraType = 'Flying';
+  const te2 = buildPanelModel(partial).matchup.typeEdge;
+  assert.deepEqual(te2.theirSE, [], 'Ground moves no longer hit a Flying tera');
+  assert.ok(te2.theirPotentialSE.some((x) => x.move === 'Ice Spinner'), 'Ice Spinner is the new SE threat');
+  const html = renderPanel(buildPanelModel(partial));
+  assert.ok(html.includes('psa-match-row-type'), 'Type row renders');
+  assert.ok(html.includes('psa-match-se'), 'SE cell is amber-highlighted');
+});
+
+test('render: type row shows revealed and possible SE hits side by side', () => {
+  const lines = realLog.split('\n');
+  const partial = parseLog(lines.slice(0, lines.indexOf('|turn|2')).join('\n'));
+  const html = renderPanel(buildPanelModel(partial));
+  assert.ok(html.includes('psa-match-row-type'), 'Type row present');
+  // Their revealed Earthquake is 2×; the likely hidden ones are marked 'could:'.
+  assert.ok(html.includes('Earthquake 2×'), 'revealed SE move named');
+  assert.ok(html.includes('could:') && html.includes('Headlong Rush'), 'potential SE moves named as could-haves');
+  // Ours: Dragon Pulse is neutral, so the cell says no coverage (muted).
+  assert.ok(html.includes('no SE coverage'), 'our cell notes the lack of SE coverage');
+  assert.ok(html.includes('psa-match-type-none'), 'no-coverage cell uses the muted style');
+});
+
+test('model: predicted damage for each side\'s best move', () => {
+  const lines = realLog.split('\n');
+  const partial = parseLog(lines.slice(0, lines.indexOf('|turn|2')).join('\n'));
+  const d = buildPanelModel(partial).matchup.damage;
+  assert.equal(d.ours.move, 'Dragon Pulse');
+  assert.ok(Math.abs(d.ours.pct - 41.6) < 0.1, 'our best hit is ~42%');
+  assert.equal(d.theirs.move, 'Earthquake');
+  assert.ok(Math.abs(d.theirs.pct - 66.2) < 0.1, 'their best hit is ~66%');
+  // The likely-but-unrevealed threat is kept when it genuinely threatens.
+  assert.equal(d.theirHidden.move, 'Headlong Rush');
+  assert.ok(d.theirHidden.pct > 75, 'hidden threat is ~80%');
+});
+
+test('render: damage row with win/dim tinting and the hidden-move warning', () => {
+  const lines = realLog.split('\n');
+  const partial = parseLog(lines.slice(0, lines.indexOf('|turn|2')).join('\n'));
+  const html = renderPanel(buildPanelModel(partial));
+  const row = html.slice(html.indexOf('psa-match-row-dmg'), html.indexOf('</tr>', html.indexOf('psa-match-row-dmg')));
+  assert.ok(row.includes('psa-match-row-dmg'), 'damage row present');
+  assert.ok(row.includes('~42% Dragon Pulse'), 'our best hit shown');
+  assert.ok(row.includes('~66% Earthquake'), 'their best hit shown');
+  assert.ok(row.includes('could: ~80% Headlong Rush'), 'hidden threat flagged as could-have');
+  assert.ok(row.includes('psa-match-lose'), 'our lower damage is dimmed');
+  assert.ok(row.includes('psa-match-win'), 'their higher damage is tinted green');
+  // Roll range in the tooltip.
+  assert.ok(row.includes('38.2-45.2% roll'), 'our roll range is in the tooltip');
+});
+
+test('render: a potential OHKO on us shows red in the damage row', () => {
+  const lines = realLog.split('\n');
+  const partial = parseLog(lines.slice(0, lines.indexOf('|turn|2')).join('\n'));
+  // Gengar (Ghost/Poison) takes a 2× Earthquake for >100% — a likely OHKO.
+  const us = partial.sides.p1.pokemon.find((m) => m.species === 'Raging Bolt');
+  us.species = 'Gengar';
+  const html = renderPanel(buildPanelModel(partial));
+  const row = html.slice(html.indexOf('psa-match-row-dmg'), html.indexOf('</tr>', html.indexOf('psa-match-row-dmg')));
+  assert.ok(row.includes('psa-match-danger'), 'an OHKO threat on us is red, not green');
+  assert.ok(!row.includes('psa-match-win'), 'danger overrides the green win tint');
+});
+
+test('model: every bench candidate carries the predicted-damage comparison', () => {
+  const lines = realLog.split('\n');
+  const partial = parseLog(lines.slice(0, lines.indexOf('|turn|2')).join('\n'));
+  const mk = (species, moves, opts = {}) => {
+    const mon = createPokemon({ ident: 'p1b: ' + species, side: 'p1', species, level: 100 });
+    for (const mv of moves) addMove(mon, mv);
+    mon.hpPercent = opts.hpPercent ?? 100;
+    mon.hp = { cur: mon.hpPercent, max: 100 };
+    if (opts.fainted) mon.fainted = true;
+    return mon;
+  };
+  partial.sides.p1.pokemon.push(
+    mk('Garchomp', ['Outrage']),
+    mk('Corviknight', ['Body Press']),
+    mk('Chansey', ['Seismic Toss']),
+    mk('Gengar', ['Shadow Ball'], { fainted: true })
+  );
+  const m = buildPanelModel(partial);
+  const byName = Object.fromEntries(m.us.team.map((c) => [c.species, c]));
+  // The active mon is on the field — not a switch candidate.
+  assert.equal(byName['Raging Bolt'].vsActive, null);
+  // A fainted mon can't switch in.
+  assert.equal(byName['Gengar'].vsActive, null);
+  const g = byName['Garchomp'].vsActive;
+  assert.equal(g.species, 'Great Tusk', 'comparison is against their active');
+  assert.equal(g.takes.move, 'Earthquake');
+  assert.equal(g.deals.move, 'Outrage');
+  assert.equal(g.hidden.move, 'Ice Spinner', 'the likely hidden threat is flagged per candidate');
+  // A wall shows ~0% — the immune matchup, not 'unknown'.
+  assert.equal(byName['Corviknight'].vsActive.takes.move, 'Earthquake');
+  assert.equal(byName['Corviknight'].vsActive.takes.pct, 0);
+  // Team-preview slots (species known, no battle record) get no comparison.
+  const preview = byName['Iron Treads'] ?? byName['Rillaboom'];
+  if (preview && preview.preview) assert.equal(preview.vsActive, null);
+});
+
+test('render: damage comparison line on switch candidates, with threat coloring', () => {
+  const lines = realLog.split('\n');
+  const partial = parseLog(lines.slice(0, lines.indexOf('|turn|2')).join('\n'));
+  const mk = (species, moves) => {
+    const mon = createPokemon({ ident: 'p1b: ' + species, side: 'p1', species, level: 100 });
+    for (const mv of moves) addMove(mon, mv);
+    mon.hpPercent = 100;
+    mon.hp = { cur: 100, max: 100 };
+    return mon;
+  };
+  partial.sides.p1.pokemon.push(mk('Garchomp', ['Outrage']), mk('Corviknight', ['Body Press']), mk('Chansey', ['Seismic Toss']));
+  const html = renderPanel(buildPanelModel(partial));
+  assert.ok(html.includes('psa-card-vs'), 'the comparison line renders on candidates');
+  assert.ok(html.includes('vs Great Tusk:'), 'names the opponent active');
+  assert.ok(html.includes('takes ~35% (Earthquake)'), 'incoming damage shown');
+  assert.ok(html.includes('deals ~32% (Outrage)'), 'return damage shown');
+  assert.ok(html.includes('could take ~75% (Ice Spinner)'), 'hidden threat shown as could-have');
+  assert.ok(html.includes('takes ~0% (Earthquake)'), 'an immune wall shows ~0%, not unknown');
+  assert.ok(html.includes('psa-card-vs-warn'), "Chansey's 55% incoming is amber-warned");
+  // The active card must NOT carry the comparison (it's covered by the matchup).
+  const activeCard = html.slice(html.indexOf('Raging Bolt'), html.indexOf('psa-card', html.indexOf('Raging Bolt') + 1));
+  assert.ok(!activeCard.includes('psa-card-vs'), 'no comparison on the active card');
+});
+
+test('model: matchup is null when a side has no active (battle over)', () => {
+  const m = buildPanelModel(state); // full log — their whole team fainted
+  assert.equal(m.matchup, null);
+  // Team preview: no actives either.
+  const preview = buildPanelModel(parseLog('|player|p1|Me|\n|player|p2|Rival|\n|poke|p1|Pikachu|\n|poke|p2|Gengar|'));
+  assert.equal(preview.matchup, null);
+});
+
+test('model+render: matchup shows our exact stats and the highlighted Spe row', () => {
+  const lines = realLog.split('\n');
+  const partial = parseLog(lines.slice(0, lines.indexOf('|turn|2')).join('\n'));
+  // Live request data makes our stats exact points.
+  partial.sides.p1.pokemon.find((m) => m.species === 'Raging Bolt').stats = {
+    atk: 110, def: 110, spa: 160, spd: 110, spe: 165,
+  };
+  const m = buildPanelModel(partial);
+  assert.equal(m.matchup.ours.stats.find((s) => s.key === 'S').text, '165');
+  assert.equal(m.matchup.ours.stats.find((s) => s.key === 'S').exact, true);
+  const html = renderPanel(m);
+  assert.ok(html.includes('psa-matchup'));
+  assert.ok(html.includes('Raging Bolt'));
+  assert.ok(html.includes('Great Tusk'));
+  assert.ok(html.includes('psa-match-row-spe'), 'the Spe row is highlighted');
+  assert.ok(html.includes('>165</td>'), 'our exact Speed renders in the table');
+  assert.ok(html.includes('psa-match-speed'), 'the speed line banner is present');
+});
+
 test('render: mid-battle state (partial log) works', () => {
   const lines = realLog.split('\n');
   const prefix = lines.slice(0, lines.indexOf('|turn|2')).join('\n');
@@ -227,7 +461,7 @@ test('render: mid-battle state (partial log) works', () => {
   const html = renderPanel(m);
   assert.ok(html.includes('7%'));
   assert.ok(html.includes('21%'));
-  assert.ok(!html.includes('wins'));
+  assert.ok(html.includes('psa-match-table'), 'the matchup table renders mid-battle');
 });
 
 test('render: empty / no-battle state', () => {

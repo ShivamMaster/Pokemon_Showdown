@@ -232,6 +232,19 @@ export function incomingPercent(theirActive, target, gen, field, calcOpts = {}) 
   return { pct: max, move };
 }
 
+// Damage % their active threatens `target` with, counting the worst hidden
+// move as well as revealed ones. Potential moves are a possibility, not a
+// certainty, so they're discounted (and only counted when genuinely
+// threatening) — a speculative threat alone shouldn't override a strong move.
+// Used symmetrically for our current mon and every switch candidate, so a
+// forced send-in never picks a mon their active could wreck unseen.
+export function effectiveIncoming(theirActive, target, gen, field, calcOpts = {}) {
+  const now = incomingPercent(theirActive, target, gen, field, calcOpts);
+  const pot = worstThreat(theirActive, target, gen, field, calcOpts);
+  const potIn = pot && pot.pct >= 50 ? pot.pct * 0.6 : 0;
+  return Math.max(now.pct, potIn);
+}
+
 export function ownBestDamage(candidate, theirTarget, gen, field, calcOpts = {}) {
   let max = 0;
   for (const moveName of candidate?.moves ?? []) {
@@ -241,21 +254,52 @@ export function ownBestDamage(candidate, theirTarget, gen, field, calcOpts = {})
   return max;
 }
 
+// Best revealed move of each side against the other's active, plus the
+// strongest likely-hidden move their mon could hit us with (kept only when it
+// genuinely threatens, ≥50%). This is the SINGLE source for both the matchup
+// view's Damage row (panel.js) and the recommendation reasoning, so the two
+// can never disagree.
+export function matchupDamage(gen, ourMon, theirMon, field, calcOpts = {}) {
+  const bestOf = (atkMon, defMon) => {
+    let best = null;
+    let zero = null;
+    for (const moveName of atkMon?.moves ?? []) {
+      const d = damagePercent(gen, atkMon, defMon, moveName, field, calcOpts);
+      if (!d) continue;
+      if (d.mean > 0) {
+        if (!best || d.mean > best.pct) {
+          best = { pct: d.mean, min: d.min, max: d.max, move: moveName, effectiveness: d.effectiveness };
+        }
+      } else if (!zero) {
+        // Keep a 0-damage move (immune/resisted wall) as a fallback so a mon
+        // that walls the opponent shows "takes ~0%" instead of "unknown".
+        zero = { pct: 0, min: 0, max: 0, move: moveName, effectiveness: d.effectiveness };
+      }
+    }
+    return best ?? zero;
+  };
+  const ours = bestOf(ourMon, theirMon);
+  const theirs = bestOf(theirMon, ourMon);
+  const hidden = worstThreat(theirMon, ourMon, gen, field, calcOpts);
+  return {
+    ours,
+    theirs,
+    theirHidden: hidden && hidden.pct >= 50 ? { move: hidden.move, pct: hidden.pct, max: hidden.max } : null,
+  };
+}
+
 export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, calcOpts = {}, speedCtx = null) {
   const now = incomingPercent(theirActive, ourActive, gen, field, calcOpts);
   const cand = incomingPercent(theirActive, candidate, gen, field, calcOpts);
   const candOff = ownBestDamage(candidate, theirActive, gen, field, calcOpts);
-  // Early in a battle (or against any mon with unrevealed slots) their moves
-  // are largely unknown — staying also risks the moves they *could* have.
-  // Evaluate the switch against the full threat: the worst hidden move their
-  // active could hit our CURRENT mon with, not just what's been shown.
-  // Potential moves are a possibility, not a certainty, so they're discounted
-  // (and only counted when genuinely threatening) — a speculative threat alone
-  // shouldn't override a strong move like a 4× KO.
+  // Both sides of the comparison use the FULL threat — revealed moves plus
+  // the worst discounted hidden move. Staying risks what they *could* have;
+  // so does switching in, and a candidate that a hidden move mauls is exactly
+  // the "sends in a Pokémon that is also weak" trap this guards against.
+  const effectiveNow = effectiveIncoming(theirActive, ourActive, gen, field, calcOpts);
+  const candEff = effectiveIncoming(theirActive, candidate, gen, field, calcOpts);
   const nowPot = worstThreat(theirActive, ourActive, gen, field, calcOpts);
-  const potIn = nowPot && nowPot.pct >= 50 ? nowPot.pct * 0.6 : 0;
-  const effectiveNow = Math.max(now.pct, potIn);
-  let net = (effectiveNow - cand.pct) + candOff * 0.15;
+  let net = (effectiveNow - candEff) + candOff * 0.15;
   if (net <= 0) return null;
   const theirMove = now.move ?? cand.move ?? 'their moves';
   let note =
@@ -278,12 +322,11 @@ export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, ca
       note += `; but their ${theirActive.species} outspeeds ${candidate.species} — it hits first`;
     }
   }
-  // The switch assessment only sees their revealed moves. If their species
-  // could know a hidden move that mauls this candidate, penalize the switch
-  // and say so — the decision should account for what they might have.
+  // If their species could know a hidden move that mauls this candidate, say
+  // so — the discounted threat already counts in the net, but the note makes
+  // the risk visible.
   const threat = worstThreat(theirActive, candidate, gen, field, calcOpts);
-  if (threat && threat.pct >= 60) {
-    net -= threat.pct >= 80 ? 10 : 5;
+  if (threat && threat.pct >= 60 && threat.pct * 0.6 > cand.pct) {
     note += `; but their ${theirActive?.species} could have ${threat.move} (~${round1(threat.pct)}%) — hidden`;
   }
   return {
@@ -303,16 +346,30 @@ export function bestSwitchIn(ourTeam, theirActive, gen, field, profile = null, c
   for (const candidate of ourTeam) {
     const cand = incomingPercent(theirActive, candidate, gen, field, calcOpts);
     const candOff = ownBestDamage(candidate, theirActive, gen, field, calcOpts);
-    const score = candOff - cand.pct * 0.2;
+    // Incoming damage counts revealed moves plus the discounted worst hidden
+    // move — at battle start nothing is revealed, and this is what stops the
+    // engine from sending in a mon their active could wreck. Damage and
+    // offense trade one-for-one: a candidate that takes much more than it
+    // deals is a bad send-in, and a 4x-weak pick loses to a bulky one unless
+    // its offense clearly outweighs the hits it will eat.
+    const effIn = effectiveIncoming(theirActive, candidate, gen, field, calcOpts);
+    const score = candOff - effIn;
     if (score > bestScore) {
       bestScore = score;
+      // Name the move behind the incoming number: the revealed best, or the
+      // hidden worst when that's what actually threatens the candidate.
+      const hidden = worstThreat(theirActive, candidate, gen, field, calcOpts);
+      const threatName =
+        hidden && hidden.pct >= 50 && hidden.pct * 0.6 > cand.pct
+          ? `their ${theirActive?.species} could hit it with ${hidden.move} (~${round1(hidden.pct)}%)`
+          : `their ${cand.move ?? 'moves'}`;
       best = {
         ident: candidate.ident,
         species: candidate.species,
-        candIn: round1(cand.pct),
+        candIn: round1(effIn),
         candOff: round1(candOff),
         net: round1(score),
-        note: `Send in ${candidate.species}: takes ~${round1(cand.pct)}% from their ${cand.move ?? 'moves'}${candOff ? `, hits back for ~${round1(candOff)}%` : ''}`,
+        note: `Send in ${candidate.species}: takes ~${round1(effIn)}% from ${threatName}${candOff ? `, hits back for ~${round1(candOff)}%` : ''}`,
       };
     }
   }
@@ -384,6 +441,9 @@ export function recommend(state, opts = {}) {
   }
 
   let theirTarget = activeMon(theirSide);
+  // Their target may be a *predicted* switch-in (their active is down) —
+  // damage claims about it are speculative, so those are skipped below.
+  const targetIsPredicted = !theirActive;
   let stayProb;
   let switchProbs;
   if (!theirTarget) {
@@ -415,6 +475,14 @@ export function recommend(state, opts = {}) {
   }
 
   const bench = ourTeam.filter((m) => m.ident !== ourActive.ident);
+  // We just brought our active in this turn — switching again right away would
+  // hand them a free turn (and is the pivot ping-pong: switch A→B, then the
+  // engine says switch back to A). Suppress switch advice in that window.
+  const justBroughtIn = !!ourActive?.justSwitchedIn;
+  // A mon that left the field this turn or the previous one is also off the
+  // table as a switch target — sending it straight back in is the same
+  // flip-flop. (Fainted mons are never candidates anyway.)
+  const recentlyLeft = (m) => m.switchedOutTurn != null && state.turn - m.switchedOutTurn <= 1;
 
   const moveEvals = [];
   const speed = speedOrder(ourActive, theirTarget, gen, state, ourSideId);
@@ -431,10 +499,16 @@ export function recommend(state, opts = {}) {
   moveEvals.sort((a, b) => b.score - a.score);
 
   const speedCtx = { state, ourSideId };
-  const switchEvals = bench
-    .map((m) => evaluateSwitch(ourActive, m, theirTarget, gen, field, calcOpts, speedCtx))
-    .filter(Boolean)
-    .sort((a, b) => b.net - a.net);
+  let switchEvals = [];
+  if (!justBroughtIn) {
+    switchEvals = bench
+      .filter((m) => !recentlyLeft(m))
+      .map((m) => evaluateSwitch(ourActive, m, theirTarget, gen, field, calcOpts, speedCtx))
+      .filter(Boolean)
+      .sort((a, b) => b.net - a.net);
+  } else {
+    reasoning.push(`You just brought in ${ourActive.species} — switching again immediately would give them a free turn.`);
+  }
 
   const bestMove = moveEvals[0] ?? null;
   const bestSwitch = switchEvals[0] ?? null;
@@ -511,6 +585,16 @@ export function recommend(state, opts = {}) {
     }
   }
 
+  // Their best revealed move's damage on us — the same number the matchup
+  // view's Damage row shows (both come from matchupDamage), so the panel and
+  // the reasoning always agree. Skipped against a predicted switch-in.
+  if (!targetIsPredicted) {
+    const dmg = matchupDamage(gen, ourActive, theirTarget, field, calcOpts);
+    if (dmg.theirs && dmg.theirs.pct >= 25) {
+      reasoning.push(`Their ${theirTarget.species} hits your ${ourActive.species} for ~${round1(dmg.theirs.pct)}% (${dmg.theirs.move}).`);
+    }
+  }
+
   // Hidden moves: the opponent's active may know something we haven't seen.
   const unknown = theirTarget?.moves?.length ?? 0;
   if (unknown < 4) {
@@ -536,13 +620,15 @@ export function recommend(state, opts = {}) {
   let moveConfidence = 100;
   const runnerUp = moveEvals[1] ?? null;
   if (bestMove && runnerUp && runnerUp.score > 0) {
-    moveConfidence = Math.round((bestMove.score / (bestMove.score + runnerUp.score)) * 100);
+    moveConfidence = Math.round(clamp01(bestMove.score / (bestMove.score + runnerUp.score)) * 100);
   }
   let switchConfidence = null;
   if (switchTo) {
-    const alt = bestMove?.score ?? 0;
+    // The alternative is "use the best move". A move that scores negative is
+    // worse than useless, so it can't inflate the switch's share past 100%.
+    const alt = Math.max(0, bestMove?.score ?? 0);
     const total = switchTo.score + alt;
-    switchConfidence = total > 0 ? Math.round((switchTo.score / total) * 100) : 100;
+    switchConfidence = total > 0 ? Math.round(clamp01(switchTo.score / total) * 100) : 100;
   }
 
   return {
@@ -550,7 +636,7 @@ export function recommend(state, opts = {}) {
       ? { move: bestMove.move, score: bestMove.score, note: bestMove.note, expected: bestMove.expected, confidence: moveConfidence }
       : null,
     switchTo: switchTo ? { ...switchTo, confidence: switchConfidence } : null,
-    reasoning: reasoning.slice(0, 6),
+    reasoning: reasoning.slice(0, 7),
     note: null,
   };
 }

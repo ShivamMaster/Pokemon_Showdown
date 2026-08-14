@@ -8,7 +8,11 @@
 // and in the browser (extension content script + demo page). The engine will
 // plug into the recommendation slot later via opts.recommendation.
 
-import { Pokemon } from '@smogon/calc';
+import { Pokemon, Move } from '@smogon/calc';
+import { buildField, buildPokemon, effectivenessOf } from '../engine/calc.js';
+import { topPotentialMoves } from '../engine/movepool.js';
+import { matchupDamage } from '../engine/recommend.js';
+import { speedLine } from '../engine/speed.js';
 
 const STATUS_LABELS = {
   brn: 'Burn',
@@ -56,7 +60,13 @@ function statsOf(gen, mon) {
   for (const s of STAT_KEYS) {
     const r = statRangeOf(gen, mon, s);
     if (!r) continue;
-    out.push({ key: STAT_SHORT[s], text: r.min === r.max ? String(r.min) : `${r.min}-${r.max}`, exact: r.exact });
+    out.push({
+      key: STAT_SHORT[s],
+      text: r.min === r.max ? String(r.min) : `${r.min}-${r.max}`,
+      exact: r.exact,
+      min: r.min,
+      max: r.max,
+    });
   }
   return out.length ? out : null;
 }
@@ -71,6 +81,70 @@ export function escapeHtml(s) {
   }[c]));
 }
 
+// Types of a mon as they currently are on the field. The calc Pokemon resolves
+// the species' types from its data; a terastallized mon shows only its tera
+// type (the calc keeps base types in `.types` and applies tera during damage
+// calcs, so we handle it here — same rule as the engine's worstThreat).
+function fieldTypes(gen, mon) {
+  if (!mon?.species) return null;
+  if (mon.terastallized && mon.teraType) return [mon.teraType];
+  try {
+    return buildPokemon(gen, mon).types ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function moveTypeOf(gen, moveName) {
+  try {
+    return new Move(gen, moveName).type ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Type-effectiveness summary for the active matchup: which of our moves hit
+// their current types super effectively (2×+), and which of theirs — revealed
+// or merely likely (top potential moves, marked separately) — could hit ours.
+// Status moves and unresolvable moves are skipped.
+export function typeEdgeOf(gen, ourMon, theirMon) {
+  const edge = { ourSE: [], theirSE: [], theirPotentialSE: [], unknown: false };
+  const ourTypes = fieldTypes(gen, ourMon);
+  const theirTypes = fieldTypes(gen, theirMon);
+  if (!ourTypes || !theirTypes) {
+    edge.unknown = true;
+    return edge;
+  }
+  const effVs = (defTypes) => (moveName) => {
+    const t = moveTypeOf(gen, moveName);
+    if (!t) return null;
+    return effectivenessOf(gen, t, defTypes);
+  };
+  const push = (list, move, mult) => list.push({ move, mult });
+  const ourEff = effVs(theirTypes);
+  for (const m of ourMon?.moves ?? []) {
+    const e = ourEff(m);
+    if (e != null && e >= 2) push(edge.ourSE, m, e);
+  }
+  const theirEff = effVs(ourTypes);
+  for (const m of theirMon?.moves ?? []) {
+    const e = theirEff(m);
+    if (e != null && e >= 2) push(edge.theirSE, m, e);
+  }
+  // Likely-but-unrevealed threats from their species' learnset.
+  const revealed = new Set(theirMon?.moves ?? []);
+  for (const m of topPotentialMoves(theirMon?.species, 8, gen) ?? []) {
+    if (revealed.has(m)) continue;
+    const e = theirEff(m);
+    if (e != null && e >= 2) push(edge.theirPotentialSE, m, e);
+  }
+  const sort = (l) => l.sort((a, b) => b.mult - a.mult || a.move.localeCompare(b.move));
+  sort(edge.ourSE);
+  sort(edge.theirSE);
+  sort(edge.theirPotentialSE);
+  return edge;
+}
+
 // ---------------------------------------------------------------------------
 // Display model
 // ---------------------------------------------------------------------------
@@ -80,8 +154,22 @@ export function buildPanelModel(state, opts = {}) {
   const ourSide = state?.sides?.[ourSideId] ?? null;
   const theirSide = ourSideId === 'p1' ? state?.sides?.p2 ?? null : state?.sides?.p1 ?? null;
   const gen = state?.gen ?? 9;
+  const field = buildField(state);
 
   const empty = !(ourSide?.pokemon?.length || theirSide?.pokemon?.length);
+
+  // The Pokémon currently on the field for a side (the engine's activeMon).
+  const activeOf = (side) => {
+    for (const ident of side?.active ?? []) {
+      const mon = side?.pokemon?.find((p) => p.ident === ident);
+      if (mon && !mon.fainted) return mon;
+    }
+    // Fallback for request-created records (the request sets mon.active
+    // without touching side.active).
+    return side?.pokemon?.find((p) => p.active && !p.fainted) ?? null;
+  };
+  const ourActiveMon = activeOf(ourSide);
+  const theirActiveMon = activeOf(theirSide);
 
   const getPotential = opts.getPotentialMoves ?? null;
 
@@ -102,10 +190,23 @@ export function buildPanelModel(state, opts = {}) {
     return parts.length ? parts.join(' · ') : null;
   };
 
-  const cardOf = (mon, showPotential) => {
+  const cardOf = (mon, showPotential, vsActiveMon = null) => {
     const boosts = Object.fromEntries(Object.entries(mon.boosts ?? {}).filter(([, v]) => v !== 0));
     const hidden = Math.max(0, 4 - (mon.moves?.length ?? 0));
     const stats = statsOf(gen, mon);
+    // Predicted-damage comparison vs their active, for switch candidates in
+    // the You box. Same matchupDamage source as the matchup's Damage row, so
+    // every number agrees everywhere. Only alive bench mons are candidates.
+    let vsActive = null;
+    if (vsActiveMon && !mon.fainted && !mon.active) {
+      const d = matchupDamage(gen, mon, vsActiveMon, field);
+      vsActive = {
+        species: vsActiveMon.species,
+        takes: d.theirs ?? null,
+        deals: d.ours ?? null,
+        hidden: d.theirHidden,
+      };
+    }
     return {
       ident: mon.ident,
       species: mon.species,
@@ -133,6 +234,7 @@ export function buildPanelModel(state, opts = {}) {
       switchCount: mon.switchCount ?? 0,
       potential:
         showPotential && hidden > 0 && getPotential ? (getPotential(mon.species) ?? []).slice(0, 3) : [],
+      vsActive,
     };
   };
 
@@ -167,7 +269,7 @@ export function buildPanelModel(state, opts = {}) {
   // Six slots per side (or the team size): team-preview order for the
   // opponent, request order for our team. Unknown slots stay as placeholders
   // and fill in as Pokémon are revealed.
-  const sideModel = (side, { showPotential } = {}) => {
+  const sideModel = (side, { showPotential, vsActive } = {}) => {
     const roster = side?.roster ?? [];
     const pokemon = side?.pokemon ?? [];
     const order = roster.length ? roster.map((r) => r.species) : pokemon.map((p) => p.species);
@@ -181,7 +283,7 @@ export function buildPanelModel(state, opts = {}) {
       if (!mon) mon = pokemon.find((p) => !used.has(p.ident)) ?? null;
       if (mon) used.add(mon.ident);
       if (mon) {
-        slots.push(cardOf(mon, showPotential));
+        slots.push(cardOf(mon, showPotential, vsActive));
       } else if (roster[i]?.species) {
         // Team preview: the species is known (|poke|) even though no battle
         // record exists yet — show it instead of a blank slot.
@@ -199,6 +301,19 @@ export function buildPanelModel(state, opts = {}) {
         .sort(),
     };
   };
+
+  // Active-matchup comparison: our lead vs their lead, side by side. Only
+  // shown once both sides actually have a Pokémon on the field.
+  let matchup = null;
+  if (ourActiveMon && theirActiveMon) {
+    matchup = {
+      ours: cardOf(ourActiveMon, false),
+      theirs: cardOf(theirActiveMon, false),
+      speed: speedLine(ourActiveMon, theirActiveMon, gen, state, ourSideId),
+      typeEdge: typeEdgeOf(gen, ourActiveMon, theirActiveMon),
+      damage: matchupDamage(gen, ourActiveMon, theirActiveMon, field),
+    };
+  }
 
   const fieldParts = [];
   fieldParts.push(`weather: ${state?.field?.weather ?? 'none'}`);
@@ -235,7 +350,8 @@ export function buildPanelModel(state, opts = {}) {
       oppName: theirSide?.playerName ?? null,
     },
     field: fieldParts.join(' · '),
-    us: sideModel(ourSide, { showPotential: false }),
+    matchup,
+    us: sideModel(ourSide, { showPotential: false, vsActive: theirActiveMon }),
     them: sideModel(theirSide, { showPotential: true }),
     recommendation: opts.recommendation ?? null,
     profile: opts.profile ?? null,
@@ -301,6 +417,29 @@ function renderCard(card) {
   const potentialHtml = card.potential?.length
     ? `<div class="psa-potential">could have: ${escapeHtml(card.potential.join(' · '))}</div>`
     : '';
+  // Predicted-damage comparison vs their active — the same matchupDamage
+  // figures as the matchup's Damage row, one line per switch candidate.
+  const vsHtml = card.vsActive
+    ? (() => {
+        const parts = [];
+        const t = card.vsActive.takes;
+        if (t?.move) {
+          const p = Math.round(t.pct);
+          const cls = p >= 100 ? 'psa-card-vs-danger' : p >= 50 ? 'psa-card-vs-warn' : '';
+          parts.push(`<span class="${cls}">takes ~${p}% (${escapeHtml(t.move)})</span>`);
+        } else {
+          parts.push('<span class="psa-muted">no revealed damage in</span>');
+        }
+        if (card.vsActive.deals) {
+          const p = Math.round(card.vsActive.deals.pct);
+          parts.push(`<span class="${p >= 50 ? 'psa-card-vs-good' : ''}">deals ~${p}% (${escapeHtml(card.vsActive.deals.move)})</span>`);
+        }
+        if (card.vsActive.hidden) {
+          parts.push(`<span class="psa-muted">could take ~${Math.round(card.vsActive.hidden.pct)}% (${escapeHtml(card.vsActive.hidden.move)})</span>`);
+        }
+        return `<div class="psa-card-vs" title="Predicted damage if you switch ${escapeHtml(card.species)} in against their ${escapeHtml(card.vsActive.species)} (same calc as the recommendations)">vs ${escapeHtml(card.vsActive.species)}: ${parts.join(' · ')}</div>`;
+      })()
+    : '';
 
   return `<div class="psa-card${card.active ? ' psa-active' : ''}${card.fainted ? ' psa-fainted' : ''}${card.preview ? ' psa-preview' : ''}" title="${escapeHtml(card.ident)}">
   <div class="psa-card-head">
@@ -314,6 +453,7 @@ function renderCard(card) {
   ${hpBar(card.hpPercent)}
   <div class="psa-card-hp">${card.hpPercent != null ? `${card.hpPercent}%` : '<span class="psa-muted">??</span>'}</div>
   ${statsHtml}
+  ${vsHtml}
   <div class="psa-card-moves">${movesHtml}</div>
   ${potentialHtml}
   <div class="psa-card-details">${escapeHtml(details)}</div>
@@ -327,6 +467,105 @@ function renderEmptySlot(slot) {
   <div class="psa-card-head"><span class="psa-species psa-muted">Slot ${slot}</span></div>
   <div class="psa-card-hp psa-muted">?</div>
   <div class="psa-card-moves psa-muted">not revealed yet</div>
+</div>`;
+}
+
+function renderMatchup(matchup) {
+  if (!matchup) return '';
+  const statOf = (card, key) => card.stats?.find((x) => x.key === key) ?? null;
+  const statText = (card, key) => statOf(card, key)?.text ?? '—';
+  const hpText = (c) => (c.hpPercent != null ? `${c.hpPercent}%` : '??');
+  const itemText = (c) => (c.itemKnown ? (c.item ?? 'None') : '?');
+
+  // Certainty-based comparison: green marks the side that *definitely* wins a
+  // stat. Ranges only tint when they don't overlap (a 182-245 vs 250-310 Atk
+  // is a sure loss, but 182-245 vs 220-280 is a coin flip and stays neutral).
+  const winnerOf = (us, them) => {
+    if (!us || !them) return '';
+    const oMin = us.min, oMax = us.max, tMin = them.min, tMax = them.max;
+    if (oMin == null || oMax == null || tMin == null || tMax == null) return '';
+    if (oMin > tMax) return 'us';
+    if (tMin > oMax) return 'them';
+    return '';
+  };
+
+  const row = (label, oursText, theirsText, win = '', cls = '') => {
+    const usCls = win === 'us' ? 'psa-match-win' : win === 'them' ? 'psa-match-lose' : '';
+    const themCls = win === 'them' ? 'psa-match-win' : win === 'us' ? 'psa-match-lose' : '';
+    return `<tr class="${cls}"><td>${escapeHtml(label)}</td><td class="psa-match-us-col ${usCls}">${escapeHtml(oursText)}</td><td class="psa-match-them-col ${themCls}">${escapeHtml(theirsText)}</td></tr>`;
+  };
+
+  const hpUs = matchup.ours.hpPercent, hpThem = matchup.theirs.hpPercent;
+  const hpWin = hpUs != null && hpThem != null ? (hpUs > hpThem ? 'us' : hpThem > hpUs ? 'them' : '') : '';
+
+  // Type-effectiveness row: who hits whom super effectively.
+  const seText = (list, limit) => list.slice(0, limit).map((x) => `${x.move} ${x.mult}×`).join(', ');
+  let typeUs = '—', typeThem = '—', typeUsCls = 'psa-match-type-none', typeThemCls = 'psa-match-type-none';
+  const te = matchup.typeEdge;
+  if (te && !te.unknown) {
+    if (te.ourSE.length) {
+      typeUs = `✚ ${seText(te.ourSE, 4)}`;
+      typeUsCls = 'psa-match-se';
+    } else {
+      typeUs = 'no SE coverage';
+    }
+    const parts = [];
+    if (te.theirSE.length) parts.push(`✚ ${seText(te.theirSE, 4)}`);
+    if (te.theirPotentialSE.length) parts.push(`<span class="psa-muted">could: ${seText(te.theirPotentialSE, 3)}</span>`);
+    if (parts.length) {
+      typeThem = parts.join(' ');
+      typeThemCls = 'psa-match-se';
+    } else {
+      typeThem = 'no SE moves';
+    }
+  }
+  const typeRow = `<tr class="psa-match-row-type"><td title="Type effectiveness: which of your moves hit their types super effectively, and which of theirs (revealed or likely) could hit yours">Type</td><td class="psa-match-us-col ${typeUsCls}" title="Your revealed moves that hit their current types for 2× or more">${typeUs}</td><td class="psa-match-them-col ${typeThemCls}" title="Their revealed moves that hit you super effectively; 'could:' = likely options from their species' learnset that aren't revealed yet">${typeThem}</td></tr>`;
+
+  // Predicted-damage row: each side's best move, with the strongest likely
+  // hidden move flagged as 'could:' when it threatens.
+  const dmg = matchup.damage;
+  const oursDmg = dmg?.ours ?? null;
+  const theirsDmg = dmg?.theirs ?? null;
+  const theirHidden = dmg?.theirHidden ?? null;
+  let dmgUs = '—', dmgThem = '—', dmgUsCls = 'psa-match-type-none', dmgThemCls = 'psa-match-type-none';
+  if (oursDmg || theirsDmg) {
+    const winner =
+      !oursDmg ? 'them' : !theirsDmg ? 'us' : oursDmg.pct > theirsDmg.pct ? 'us' : theirsDmg.pct > oursDmg.pct ? 'them' : '';
+    const cellCls = (isUs, pct) => {
+      if (pct == null) return 'psa-match-type-none';
+      // A potential OHKO reads as a threat, not a stat win — red beats green.
+      if (pct >= 100) return 'psa-match-danger';
+      const ahead = (isUs && winner === 'us') || (!isUs && winner === 'them');
+      return ahead ? 'psa-match-win' : 'psa-match-lose';
+    };
+    const dmgText = (d) => (d ? `~${Math.round(d.pct)}% ${d.move}` : 'no moves');
+    dmgUs = dmgText(oursDmg);
+    dmgThem = dmgText(theirsDmg);
+    if (theirHidden) dmgThem += ` <span class="psa-muted">(could: ~${Math.round(theirHidden.pct)}% ${theirHidden.move})</span>`;
+    dmgUsCls = cellCls(true, oursDmg?.pct ?? null);
+    dmgThemCls = cellCls(false, theirsDmg?.pct ?? null);
+  }
+  const dmgRow = `<tr class="psa-match-row-dmg"><td title="Predicted damage of each side's best revealed move against the other's active (mean roll, same calc as the recommendations); 'could:' = a likely hidden move that hits harder">Damage</td><td class="psa-match-us-col ${dmgUsCls}" title="${oursDmg ? `${oursDmg.min}-${oursDmg.max}% roll` : ''}">${dmgUs}</td><td class="psa-match-them-col ${dmgThemCls}" title="${theirsDmg ? `${theirsDmg.min}-${theirsDmg.max}% roll` : ''}">${dmgThem}</td></tr>`;
+
+  return `<div class="psa-matchup">
+  <div class="psa-match-head">
+    <span class="psa-match-name">${escapeHtml(matchup.ours.species)}</span>
+    <span class="psa-match-vs">vs</span>
+    <span class="psa-match-name">${escapeHtml(matchup.theirs.species)}</span>
+    <span class="psa-match-speed" title="Who acts first in this matchup">⚡ ${escapeHtml(matchup.speed)}</span>
+  </div>
+  <table class="psa-match-table" title="Green = the side that definitely wins this stat (ranges that don't overlap); neutral = too close to call">
+    ${row('HP', hpText(matchup.ours), hpText(matchup.theirs), hpWin)}
+    ${row('Atk', statText(matchup.ours, 'A'), statText(matchup.theirs, 'A'), winnerOf(statOf(matchup.ours, 'A'), statOf(matchup.theirs, 'A')))}
+    ${row('Def', statText(matchup.ours, 'D'), statText(matchup.theirs, 'D'), winnerOf(statOf(matchup.ours, 'D'), statOf(matchup.theirs, 'D')))}
+    ${row('SpA', statText(matchup.ours, 'SA'), statText(matchup.theirs, 'SA'), winnerOf(statOf(matchup.ours, 'SA'), statOf(matchup.theirs, 'SA')))}
+    ${row('SpD', statText(matchup.ours, 'SD'), statText(matchup.theirs, 'SD'), winnerOf(statOf(matchup.ours, 'SD'), statOf(matchup.theirs, 'SD')))}
+    ${row('Spe', statText(matchup.ours, 'S'), statText(matchup.theirs, 'S'), winnerOf(statOf(matchup.ours, 'S'), statOf(matchup.theirs, 'S')), 'psa-match-row-spe')}
+    ${dmgRow}
+    ${row('Item', itemText(matchup.ours), itemText(matchup.theirs))}
+    ${row('Ability', matchup.ours.ability ?? '?', matchup.theirs.ability ?? '?')}
+    ${typeRow}
+  </table>
 </div>`;
 }
 
@@ -400,6 +639,7 @@ export function renderPanel(model) {
   const body = `
   ${watchingHtml}
   ${recHtml}
+  ${renderMatchup(model.matchup)}
   ${profileHtml}
   <div class="psa-field">${escapeHtml(model.field)}</div>
   <div class="psa-columns">

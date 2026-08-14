@@ -16,6 +16,7 @@ import {
   predictSwitchProbs,
   utilityScore,
 } from '../src/engine/index.js';
+import { buildPanelModel } from '../src/ui/panel.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const realLog = readFileSync(path.join(__dirname, 'fixtures', 'real-battle.log'), 'utf8');
@@ -116,6 +117,58 @@ test('engine: weaker neutral move loses to coverage', () => {
 // ---------------------------------------------------------------------------
 // Switch advice
 // ---------------------------------------------------------------------------
+
+test('engine: no switch right after we bring in a mon (anti ping-pong)', () => {
+  const state = makeState({
+    ourActive: { species: 'Scizor', moves: ['Bullet Punch'] },
+    ourBench: [{ species: 'Tyranitar', moves: ['Stone Edge'] }],
+    theirActive: { species: 'Charizard', moves: ['Flamethrower', 'Air Slash', 'Fire Blast', 'Dragon Pulse'] },
+  });
+  // Control: Scizor is 4x weak to Fire, so the switch is normally called out.
+  assert.equal(recommend(state).switchTo.species, 'Tyranitar');
+  // But we just brought Scizor in this turn — switching again right away would
+  // hand them a free turn. No switch advice in that window.
+  const scizor = state.sides.p1.pokemon.find((m) => m.species === 'Scizor');
+  scizor.justSwitchedIn = true;
+  const rec = recommend(state);
+  assert.equal(rec.switchTo, null);
+  assert.ok(rec.reasoning.some((r) => r.includes('free turn')));
+});
+
+test('engine: a mon that just left the field is not recommended as a switch-in', () => {
+  const state = makeState({
+    ourActive: { species: 'Scizor', moves: ['Bullet Punch'] },
+    ourBench: [
+      { species: 'Tyranitar', moves: ['Stone Edge'] },
+      { species: 'Garchomp', moves: ['Earthquake'] },
+    ],
+    theirActive: { species: 'Charizard', moves: ['Flamethrower', 'Air Slash', 'Fire Blast', 'Dragon Pulse'] },
+  });
+  // Control: Tyranitar is the best switch-in.
+  assert.equal(recommend(state).switchTo.species, 'Tyranitar');
+  // Tyranitar left the field last turn (we just switched away from it) — the
+  // engine must not immediately recommend switching straight back (the pivot
+  // ping-pong). It can still suggest a different mon.
+  const ttar = state.sides.p1.pokemon.find((m) => m.species === 'Tyranitar');
+  ttar.switchedOutTurn = state.turn - 1;
+  const rec = recommend(state);
+  assert.notEqual(rec.switchTo?.species, 'Tyranitar');
+});
+
+test('engine: a forced send-in avoids a mon weak to their (unrevealed) active', () => {
+  const state = makeState({
+    ourActive: { species: 'Ferrothorn', fainted: true, moves: ['Gyro Ball'] },
+    ourBench: [
+      // Raging Bolt hits harder (2x Dragon Pulse vs Garchomp) but is 2x-weak
+      // to Garchomp's likely hidden moves; Corviknight walls all of them.
+      { species: 'Raging Bolt', moves: ['Dragon Pulse', 'Thunderbolt'] },
+      { species: 'Corviknight', moves: ['Iron Head', 'Brave Bird'] },
+    ],
+    theirActive: { species: 'Garchomp', moves: [] }, // nothing revealed yet
+  });
+  const rec = recommend(state);
+  assert.equal(rec.switchTo.species, 'Corviknight');
+});
 
 test('engine: recommends switching when the current mon is doomed', () => {
   const state = makeState({
@@ -275,6 +328,18 @@ test('engine: move confidence is the share vs the runner-up (100% when alone)', 
   // Fire Blast (4× vs Grass/Steel) should vastly outrank Air Slash (1×).
   assert.ok(rec.bestMove.confidence >= 80, `expected high confidence, got ${rec.bestMove.confidence}`);
   assert.ok(rec.bestMove.confidence <= 100);
+});
+
+test('engine: switch confidence never exceeds 100% even with a bad best move', () => {
+  const state = makeState({
+    ourActive: { species: 'Scizor', hpPercent: 30, moves: ['Bullet Punch'] }, // weak, slow, outsped
+    ourBench: [{ species: 'Tyranitar', moves: ['Stone Edge'] }],
+    theirActive: { species: 'Charizard', moves: ['Flamethrower', 'Air Slash', 'Fire Blast', 'Dragon Pulse'] },
+  });
+  const rec = recommend(state);
+  assert.ok(rec.switchTo, 'the switch should be recommended');
+  assert.ok(rec.switchTo.confidence <= 100, `confidence must be capped, got ${rec.switchTo.confidence}%`);
+  assert.ok(rec.bestMove.confidence <= 100, 'move confidence is also capped');
 });
 
 test('engine: switch confidence is its share vs the best move', () => {
@@ -467,6 +532,34 @@ test('fixture: mid-battle state produces a sensible move', () => {
   assert.equal(rec.bestMove.move, 'Dragon Pulse');
   assert.ok(rec.reasoning.length > 0);
   assert.ok(rec.reasoning.some((r) => r.includes('Dragon Pulse')));
+});
+
+test('recommend: reasoning quotes the same revealed damage as the matchup Damage row', () => {
+  const lines = realLog.split('\n');
+  const state = parseLog(lines.slice(0, lines.indexOf('|turn|2')).join('\n'));
+  const rec = recommend(state);
+  const dmg = buildPanelModel(state).matchup.damage;
+  assert.ok(dmg?.theirs, 'the Damage row has their best hit');
+  // The reasoning line and the Damage row both come from matchupDamage — the
+  // move name and figure must describe the same hit. (The bench-threat line
+  // also contains 'hits your', so match the revealed-damage phrasing exactly.)
+  const line = rec.reasoning.find((r) => /^Their .+ hits your .+ for ~\d/.test(r));
+  assert.ok(line, `expected a revealed-damage line, got: ${JSON.stringify(rec.reasoning)}`);
+  assert.ok(line.includes(dmg.theirs.move), 'the reasoning names the same move as the row');
+  assert.ok(line.includes(`~${dmg.theirs.pct.toFixed(1)}%`), 'the reasoning quotes the same damage figure');
+});
+
+test('recommend: no damage claim against a predicted switch-in', () => {
+  const state = makeState({
+    ourActive: { species: 'Raging Bolt', moves: ['Dragon Pulse'] },
+    theirActive: { species: 'Great Tusk', moves: ['Earthquake'], fainted: true },
+    theirBench: [{ species: 'Corviknight', moves: ['Body Press'] }],
+  });
+  const rec = recommend(state);
+  assert.ok(
+    !rec.reasoning.some((r) => /^Their .+ hits your .+ for ~\d/.test(r)),
+    'against a predicted switch-in the reasoning must not claim revealed damage'
+  );
 });
 
 test('fixture: full recommendation at the last decision point (turn 22)', () => {

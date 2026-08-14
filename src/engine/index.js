@@ -14,6 +14,7 @@ export {
   evaluateSwitch,
   incomingPercent,
   ownBestDamage,
+  matchupDamage,
   bestSwitchIn,
   predictStayProb,
   predictSwitchProbs,

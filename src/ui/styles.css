@@ -373,6 +373,131 @@
   color: var(--psa-ok);
 }
 
+/* Active-matchup comparison: our lead vs their lead, side by side. */
+.psa-matchup {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: #1b1f27;
+  border: 1px solid #2e3340;
+  border-radius: 8px;
+}
+
+.psa-match-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  margin-bottom: 6px;
+}
+
+.psa-match-name {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.psa-match-vs {
+  color: var(--psa-muted);
+  font-size: 11px;
+}
+
+.psa-match-speed {
+  color: var(--psa-accent);
+  font-size: 11px;
+  margin-left: auto;
+  text-align: right;
+}
+
+.psa-match-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+
+.psa-match-table td {
+  padding: 2px 4px;
+  text-align: center;
+}
+
+.psa-match-table td:first-child {
+  text-align: left;
+  color: var(--psa-muted);
+  width: 44px;
+}
+
+.psa-match-us-col {
+  color: var(--psa-ok);
+}
+
+/* Stat comparison: green = the side that definitely wins this stat.
+   Only applied when the ranges don't overlap, so it's honest, not noise. */
+.psa-match-win {
+  background: rgba(102, 187, 106, 0.16);
+  font-weight: 600;
+  border-radius: 3px;
+}
+
+.psa-match-lose {
+  color: var(--psa-muted);
+  opacity: 0.75;
+}
+
+.psa-match-row-spe td {
+  border-top: 1px solid #2e3340;
+  font-weight: 600;
+  color: var(--psa-accent);
+}
+
+.psa-match-row-spe .psa-match-win {
+  color: var(--psa-ok);
+}
+
+/* Per-card predicted-damage comparison (You box switch candidates). */
+.psa-card-vs {
+  font-size: 11px;
+  margin-top: 2px;
+  line-height: 1.35;
+}
+
+.psa-card-vs .psa-card-vs-warn {
+  color: var(--psa-warn);
+}
+
+.psa-card-vs .psa-card-vs-danger {
+  color: var(--psa-danger);
+  font-weight: 600;
+}
+
+.psa-card-vs .psa-card-vs-good {
+  color: var(--psa-ok);
+  font-weight: 600;
+}
+
+/* Predicted-damage row: green = deals more, red = potential OHKO on us. */
+.psa-match-row-dmg td {
+  border-top: 1px solid #2e3340;
+}
+
+.psa-match-row-dmg .psa-match-danger {
+  color: var(--psa-danger);
+  font-weight: 700;
+}
+
+.psa-match-row-dmg .psa-match-type-none {
+  color: var(--psa-muted);
+  font-weight: 400;
+}
+
+/* Type-effectiveness row: amber = a 2×+ hit exists, muted = no SE coverage. */
+.psa-match-row-type .psa-match-se {
+  color: var(--psa-warn);
+  font-weight: 600;
+}
+
+.psa-match-row-type .psa-match-type-none {
+  color: var(--psa-muted);
+  font-weight: 400;
+}
+
 .psa-card-moves {
   font-size: 12px;
   word-break: break-word;

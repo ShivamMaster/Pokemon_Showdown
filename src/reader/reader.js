@@ -333,7 +333,13 @@ export class BattleReader {
 
     for (const prev of side.active) {
       const pm = getPokemon(this.state, prev);
-      if (pm) pm.active = false;
+      if (pm) {
+        pm.active = false;
+        // Remember when this mon left the field, so the engine won't suggest
+        // switching straight back to it (the pivot ping-pong). The first
+        // switch-in of the battle has no outgoing mon and stays null.
+        pm.switchedOutTurn = this.state.turn;
+      }
     }
     side.active = [ident];
     mon.active = true;

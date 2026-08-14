@@ -83,6 +83,7 @@ export function createPokemon({ ident, side, species, gender, level }) {
     switchCount: 0,           // times this mon has switched in
     forcedSwitchIns: 0,       // times it was forced in (drag / pivoting user)
     justSwitchedIn: false,    // switched in this turn — cleared on the next |turn|
+    switchedOutTurn: null,    // the turn this mon last LEFT the field (null if never) — the engine uses it to avoid recommending an immediate switch-back
     evEstimate: null,         // back-calculated EV ranges: { atk:[lo,hi], spa:[lo,hi], def:[lo,hi], spd:[lo,hi], hp:[lo,hi] } in EV points, or null
     speVersion: 0,            // bumped on speed-affecting changes (spe boosts, paralysis, scarf, abilities)
     stats: null,              // exact current stats from the live request / our hover tooltip: { atk, def, spa, spd, spe } (no boosts/status/items)

@@ -298,12 +298,21 @@ captured from a real battle page and parses identically.
   - A switch is recommended when it clearly saves HP and our options are weak,
     we're in danger, the switch is clearly better than any move (net > 20), or
     their active threatens us for a large chunk of HP every turn.
+  - **No pivot ping-pong**: right after we bring in a Pokémon the engine
+    won't suggest switching again that turn ("you just brought in X —
+    switching again immediately would give them a free turn"), and a mon
+    that left the field in the last turn or two is never recommended as a
+    switch-in — so "switch to B" is never followed by "switch back to A".
   - Switch evaluation includes the opponent's **hidden moves**: early in a
     battle (or against any mon with unrevealed slots), the worst move they
     could hit your current mon with counts toward the threat — discounted,
     since potential moves aren't certainties — so the engine suggests
     switching away from a lead that a possible move would wreck. Once all 4
     moves are revealed, hidden-move speculation stops.
+  - When your active is down, the forced send-in (`bestSwitchIn`) weighs
+    incoming damage (revealed **and** discounted hidden) one-for-one against
+    the candidate's own offense, so it won't send in a Pokémon that's weak to
+    what their active has shown — or could have.
   - **Status-setup pivots**: a status wall (Chansey's Thunder Wave, Toxic,
     …) gets the "status now, switch next turn" play — inflict the status,
     then pivot to the damage dealer. A status move that would do nothing
@@ -311,6 +320,32 @@ captured from a real battle page and parses identically.
   - Every recommendation carries a **confidence %**: the best move's share vs
     the runner-up move, and the switch's share vs using the best move
     (100% when it's the only option). Shown as badges in the panel.
+- **Active-matchup view** — the panel shows your lead vs their lead side by
+  side: HP, all five stats (exact for you, estimated ranges for them that
+  narrow with learned EVs / hovered Spe), item, and ability, with the
+  highlighted **Spe row** and a ⚡ banner stating who acts first (observed
+  move order, exact stats, or the honest range overlap).
+  **Stat cells are color-coded by who wins them**: green background = the
+  side that *definitely* has the higher stat (the ranges don't overlap), and
+  the loser is dimmed. When a stat could go either way (our value falls
+  inside their range), the cell stays neutral — the coloring only claims
+  what's actually certain.
+  A **Type row** summarizes who hits whom super effectively: our revealed
+  moves that are 2×+ against their current types (tera-aware), and their
+  revealed moves that hit us 2×+ — with likely-but-unrevealed options from
+  their learnset listed as *"could:"* so you see the threat before they show
+  it.
+  A **Damage row** shows the predicted hit of each side's best move against
+  the other's active (same calc as the recommendations — mean of the roll
+  range, with the range in the tooltip). Green tints the side that deals
+  more; **red flags a likely OHKO on you** (≥100%). Their strongest
+  likely-hidden move appears as *"could: ~80% Headlong Rush"* — the early-
+  battle warning before they reveal anything.
+  The reasoning list quotes the **same figures** ("Their Great Tusk hits your
+  Raging Bolt for ~66.2% (Earthquake)"): the panel's Damage row and the
+  engine's text both come from one shared `matchupDamage` function, so they
+  can never disagree. (Against a *predicted* switch-in — their active is
+  down — the reasoning skips damage claims, since the target is a guess.)
 
 ### CLI
 

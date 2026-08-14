@@ -67,6 +67,21 @@ test('real log: metadata is parsed', () => {
   assert.equal(s.started, true);
 });
 
+test('switchedOutTurn is recorded on the mon that leaves the field', () => {
+  const s = parseLog(
+    '|player|p1|Me\n|player|p2|Rival\n|gametype|singles\n|gen|9\n' +
+    '|switch|p1a: Pikachu|Pikachu|100/100\n|switch|p2a: Gengar|Gengar|100/100\n|turn|1\n' +
+    '|switch|p1b: Snorlax|Snorlax|100/100\n'
+  );
+  const pikachu = s.sides.p1.pokemon.find((m) => m.species === 'Pikachu');
+  const snorlax = s.sides.p1.pokemon.find((m) => m.species === 'Snorlax');
+  assert.equal(pikachu.switchedOutTurn, 1, 'Pikachu left during turn 1');
+  assert.equal(snorlax.switchedOutTurn, null, 'a fresh switch-in has no switched-out turn');
+  // The battle-opening switch (nothing on the field before it) leaves null too.
+  const gengar = s.sides.p2.pokemon.find((m) => m.species === 'Gengar');
+  assert.equal(gengar.switchedOutTurn, null);
+});
+
 test('justSwitchedIn is set on switch and cleared on the next turn', () => {
   const s = parseLog('|player|p1|Me\n|player|p2|Rival\n|switch|p1a: Rillaboom|Rillaboom|100/100\n|switch|p2a: Garchomp|Garchomp|100/100\n|turn|1\n|switch|p2a: Glimmora|Glimmora|100/100\n');
   // The last switch (Glimmora) happened after |turn|1 — still flagged.
