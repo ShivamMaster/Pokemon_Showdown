@@ -80,6 +80,14 @@ test('worstThreat returns null when the whole learnset is revealed', () => {
   assert.equal(worstThreat(venusaur, dnite, 9, null), null);
 });
 
+test('worstThreat returns null once all 4 moves are revealed', () => {
+  // A Pokémon can only know 4 moves — once all 4 are seen there is nothing
+  // left to speculate about, even though the species' learnset is larger.
+  const dnite = makeMon('Dragonite', { moves: ['Outrage', 'Earthquake', 'Fire Punch', 'Ice Beam'] });
+  const charizard = makeMon('Charizard');
+  assert.equal(worstThreat(dnite, charizard, 9, null), null);
+});
+
 test('teamThreats ranks hidden threats across the team, filtered by minPct', () => {
   const glimmora = makeMon('Glimmora', { moves: ['Mortal Spin'] });
   const charizard = makeMon('Charizard');

@@ -66,6 +66,14 @@ test('real log: metadata is parsed', () => {
   assert.equal(s.started, true);
 });
 
+test('justSwitchedIn is set on switch and cleared on the next turn', () => {
+  const s = parseLog('|player|p1|Me\n|player|p2|Rival\n|switch|p1a: Rillaboom|Rillaboom|100/100\n|switch|p2a: Garchomp|Garchomp|100/100\n|turn|1\n|switch|p2a: Glimmora|Glimmora|100/100\n');
+  // The last switch (Glimmora) happened after |turn|1 — still flagged.
+  assert.equal(s.sides.p1.pokemon[0].justSwitchedIn, false, 'p1 mon switched before turn 1');
+  assert.equal(s.sides.p2.pokemon[0].justSwitchedIn, false, 'Garchomp switched before turn 1');
+  assert.equal(s.sides.p2.pokemon[1].justSwitchedIn, true, 'Glimmora just switched in');
+});
+
 test('real log: team preview rosters are built and linked to field idents', () => {
   const s = parseLog(realLog);
   assert.deepEqual(s.sides.p1.roster.map((r) => r.species), [

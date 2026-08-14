@@ -74,6 +74,7 @@ export function createPokemon({ ident, side, species, gender, level }) {
     fainted: false,
     switchCount: 0,           // times this mon has switched in
     forcedSwitchIns: 0,       // times it was forced in (drag / pivoting user)
+    justSwitchedIn: false,    // switched in this turn — cleared on the next |turn|
     evEstimate: null,         // back-calculated EV ranges: { atk:[lo,hi], spa:[lo,hi], def:[lo,hi], spd:[lo,hi], hp:[lo,hi] } in EV points, or null
   };
 }

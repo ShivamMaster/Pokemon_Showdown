@@ -275,13 +275,28 @@ captured from a real battle page and parses identically.
   - Each move is scored as expected damage vs their active Pokémon weighted by
     P(they stay), plus damage vs each benched mon weighted by P(switch-in),
     with damage capped at remaining HP and a KO bonus.
-  - Status/setup/recovery/hazard moves get fixed utility scores.
+  - Status/setup/recovery/hazard moves get utility scores; recovery value
+    scales with how much HP is actually missing (never recommended at full
+    HP), and moves that are out of PP are skipped.
   - Switching is scored by how much less damage the candidate takes from their
     active's best move than the current mon would, plus a small offensive
-    bonus; it's recommended when clearly better and our options are weak or
-    we're in danger.
+    bonus; it's recommended when clearly better and our options are weak, we're
+    in danger, or the switch is decisively better than any move we have.
   - Switch prediction uses `opts.profile` when available:
     `{ switchTendency: { atLowHp }, commonSwitchIns: { species: weight } }`.
+  - Right after the opponent switches in a Pokémon, the engine treats it as a
+    commitment (stay probability is boosted to 0.9 regardless of its HP), so
+    the move suggestion targets the new active instead of hedging toward the
+    bench — and the reasoning says "They just brought in X".
+  - A switch is recommended when it clearly saves HP and our options are weak,
+    we're in danger, the switch is clearly better than any move (net > 20), or
+    their active threatens us for a large chunk of HP every turn.
+  - Switch evaluation includes the opponent's **hidden moves**: early in a
+    battle (or against any mon with unrevealed slots), the worst move they
+    could hit your current mon with counts toward the threat — discounted,
+    since potential moves aren't certainties — so the engine suggests
+    switching away from a lead that a possible move would wreck. Once all 4
+    moves are revealed, hidden-move speculation stops.
 
 ### CLI
 

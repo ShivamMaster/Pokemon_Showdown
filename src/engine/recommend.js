@@ -8,11 +8,14 @@
 //     their benched Pokémon weighted by P(switch-in to that mon).
 //   - Expected damage is capped at the target's remaining HP (no credit for
 //     overkill), with a bonus if the move can KO.
-//   - Status/setup/recovery moves get fixed utility scores (0-50).
+//   - Status/setup/recovery moves get utility scores (0-50). Recovery value
+//     scales with how much HP is actually missing — at (near) full HP, healing
+//     is never recommended. Moves that are out of PP are skipped entirely.
 //   - Switching is scored by how much less damage the candidate takes from
 //     their active's best move than our current mon would, plus a small
 //     offensive bonus. A switch is recommended when it clearly saves HP and
-//     our current options are weak or we're in danger.
+//     our current options are weak, we're in danger, or the switch is
+//     decisively better than any move we have.
 //
 // The switch predictions (P stay / P switch-in) use profile data when
 // available: profile.switchTendency.atLowHp and profile.commonSwitchIns
@@ -74,13 +77,18 @@ export function effLabel(effectiveness) {
 // Switch prediction (profile-aware)
 // ---------------------------------------------------------------------------
 
-export function predictStayProb(theirActive, profile = null) {
+export function predictStayProb(theirActive, profile = null, justSwitched = false) {
   const hp = theirActive?.hpPercent ?? 100;
   let p;
   if (hp < 25) p = 0.35;
   else if (hp < 50) p = 0.6;
   else p = 0.8;
-  if (profile?.switchTendency?.atLowHp != null && hp < 40) {
+  // They just brought this mon in this turn — switching twice in a row is
+  // rare and hands us a free hit, so treat it as a commitment regardless of
+  // its HP. (This is why a move recommendation right after their switch
+  // should target the new active, not their bench.)
+  if (justSwitched) p = Math.max(p, 0.9);
+  if (profile?.switchTendency?.atLowHp != null && hp < 40 && !justSwitched) {
     p = 1 - profile.switchTendency.atLowHp;
   }
   return Math.round(clamp01(p) * 100) / 100;
@@ -123,11 +131,22 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
   if (vsTarget.category === 'Status') {
     const util = utilityScore(moveName);
     if (!util) return null;
+    let value = util.value;
+    let note = util.note;
+    if (RECOVERY_MOVES.has(moveName)) {
+      // Recovery is only worth something when HP is actually missing — at
+      // (near) full HP, healing is pointless and shouldn't outrank attacks.
+      const hp = attacker.hpPercent ?? 50; // unknown HP → neutral middle
+      const missing = clamp01((100 - hp) / 100);
+      value = util.value * clamp01(missing / 0.7); // full value at ≤30% HP
+      if (value <= 0.03) return null; // ≥~96% HP: don't suggest healing
+      note = `recovery (at ${hp}% HP${missing < 0.15 ? ' — near full, low value' : ''})`;
+    }
     return {
       move: moveName,
-      score: round1(util.value * 100),
+      score: round1(value * 100),
       kind: 'status',
-      note: `${moveName}: ${util.note} (utility ${Math.round(util.value * 100)}/100)`,
+      note: `${moveName}: ${note} (utility ${Math.round(value * 100)}/100)`,
     };
   }
 
@@ -223,13 +242,26 @@ export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, ca
   const now = incomingPercent(theirActive, ourActive, gen, field, calcOpts);
   const cand = incomingPercent(theirActive, candidate, gen, field, calcOpts);
   const candOff = ownBestDamage(candidate, theirActive, gen, field, calcOpts);
-  let net = (now.pct - cand.pct) + candOff * 0.15;
+  // Early in a battle (or against any mon with unrevealed slots) their moves
+  // are largely unknown — staying also risks the moves they *could* have.
+  // Evaluate the switch against the full threat: the worst hidden move their
+  // active could hit our CURRENT mon with, not just what's been shown.
+  // Potential moves are a possibility, not a certainty, so they're discounted
+  // (and only counted when genuinely threatening) — a speculative threat alone
+  // shouldn't override a strong move like a 4× KO.
+  const nowPot = worstThreat(theirActive, ourActive, gen, field, calcOpts);
+  const potIn = nowPot && nowPot.pct >= 50 ? nowPot.pct * 0.6 : 0;
+  const effectiveNow = Math.max(now.pct, potIn);
+  let net = (effectiveNow - cand.pct) + candOff * 0.15;
   if (net <= 0) return null;
   const theirMove = now.move ?? cand.move ?? 'their moves';
   let note =
     `Switch to ${candidate.species}: takes ~${round1(cand.pct)}% from ${theirMove} ` +
-    `(vs ~${round1(now.pct)}% for ${ourActive.species})` +
+    `(vs ~${round1(effectiveNow)}% for ${ourActive.species})` +
     (candOff ? `, hits back for ~${round1(candOff)}%` : '');
+  if (nowPot && nowPot.pct > now.pct) {
+    note += `; their ${theirActive?.species} could hit ${ourActive.species} with ${nowPot.move} (~${round1(nowPot.pct)}%)`;
+  }
 
   // Speed awareness: an incoming mon that outspeeds their active gets to act
   // first (much safer); one that's outsped while taking heavy damage is risky.
@@ -254,7 +286,7 @@ export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, ca
   return {
     ident: candidate.ident,
     species: candidate.species,
-    nowIn: round1(now.pct),
+    nowIn: round1(effectiveNow),
     candIn: round1(cand.pct),
     candOff: round1(candOff),
     net: round1(net),
@@ -368,8 +400,12 @@ export function recommend(state, opts = {}) {
       };
     }
   } else {
-    stayProb = predictStayProb(theirTarget, profile);
+    const justSwitched = !!theirTarget?.justSwitchedIn;
+    stayProb = predictStayProb(theirTarget, profile, justSwitched);
     switchProbs = predictSwitchProbs(theirTarget, theirTeam, stayProb, profile);
+    if (justSwitched) {
+      reasoning.push(`They just brought in ${theirTarget.species} — expect them to keep it this turn.`);
+    }
     // Speed ordering only makes sense against their actual active — against a
     // predicted switch-in the match-up could change entirely.
     reasoning.push(speedLine(ourActive, theirTarget, gen, state, ourSideId));
@@ -380,6 +416,12 @@ export function recommend(state, opts = {}) {
   const moveEvals = [];
   const speed = speedOrder(ourActive, theirTarget, gen, state, ourSideId);
   for (const moveName of ourActive.moves) {
+    // A move that's already out of PP can't be used — don't keep recommending it.
+    const pp = ourActive.movePp?.[moveName];
+    if (pp && pp.cur <= 0) {
+      reasoning.push(`${moveName} is out of PP.`);
+      continue;
+    }
     const ev = evaluateMove(ourActive, moveName, theirTarget, theirTeam, stayProb, switchProbs, gen, field, calcOpts, speed);
     if (ev) moveEvals.push(ev);
   }
@@ -397,11 +439,18 @@ export function recommend(state, opts = {}) {
   let switchTo = null;
   const moveIsWeak = !bestMove || bestMove.score < 30;
   const inDanger = (ourActive.hpPercent ?? 100) < 25;
-  if (bestSwitch && bestSwitch.net > 12 && (moveIsWeak || inDanger)) {
-    switchTo = { ident: bestSwitch.ident, species: bestSwitch.species, score: bestSwitch.net, note: bestSwitch.note };
+  const switchValue = bestSwitch?.net ?? 0;
+  // Their active threatens us for a big chunk of HP every turn — a switch that
+  // clearly reduces that is worth it even when our moves score okay.
+  const threatened = (bestSwitch?.nowIn ?? 0) >= 45;
+  // Recommend a switch when it clearly saves HP and our options are weak, we're
+  // in danger, the switch is clearly better than anything we can do, or their
+  // active is threatening our current mon hard.
+  if (bestSwitch && switchValue > 12 && (moveIsWeak || inDanger || switchValue > 20 || threatened)) {
+    switchTo = { ident: bestSwitch.ident, species: bestSwitch.species, score: switchValue, note: bestSwitch.note };
   }
   if (!bestMove && bestSwitch) {
-    switchTo = { ident: bestSwitch.ident, species: bestSwitch.species, score: bestSwitch.net, note: bestSwitch.note };
+    switchTo = { ident: bestSwitch.ident, species: bestSwitch.species, score: switchValue, note: bestSwitch.note };
   }
 
   if (bestMove) {

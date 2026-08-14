@@ -79,6 +79,9 @@ const MAX_CACHE = 400;
 // they have NOT shown yet.
 export function worstThreat(theirMon, target, gen, field, calcOpts = {}) {
   if (!theirMon || !target) return null;
+  // A Pokémon can only know 4 moves — if all 4 are revealed, there is no
+  // hidden threat left to warn about.
+  if ((theirMon.moves ?? []).length >= 4) return null;
   const revealed = new Set(theirMon.moves ?? []);
   const moves = potentialMoves(theirMon.species).filter((m) => !revealed.has(m));
   if (!moves.length) return null;

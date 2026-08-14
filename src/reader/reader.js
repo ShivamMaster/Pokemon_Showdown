@@ -161,6 +161,11 @@ export class BattleReader {
       }
       case 'turn':
         this.state.turn = parseInt(args[0], 10) || 0;
+        // A new turn starts: nobody "just switched in" anymore — the flag is
+        // only meaningful during the decision window right after a switch.
+        for (const side of [this.state.sides.p1, this.state.sides.p2]) {
+          for (const m of side.pokemon) m.justSwitchedIn = false;
+        }
         break;
       case 'win':
         this.state.winner = args[0] ?? null;
@@ -300,6 +305,7 @@ export class BattleReader {
     side.active = [ident];
     mon.active = true;
     mon.switchCount += 1;
+    mon.justSwitchedIn = true;
     this._lastSwitchWasPivot[sideId] = false;
 
     this._recordAction('switch', sideId, ident, {
