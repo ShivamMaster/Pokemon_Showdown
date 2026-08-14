@@ -106,12 +106,16 @@ best move, built in stages:
   Speed is exactly known (your `|request|` stats or a point Spe range from a
   hover), the observed order pins a bound on the other mon's base Speed —
   “their Garchomp moved after my 295-Speed Rillaboom, so its base Speed is
-  at most 295.” Because it's species-keyed, **a Pokémon that leaves and comes
-  back keeps its remembered speed** instead of returning to the full 0→252
+  at most 295.” Because it's species-keyed, **a Pokémon that leaves and  comes back keeps its remembered speed** instead of returning to the full 0→252
   guess, and the speed line labels it: “(speed remembered from earlier
-  trades).” Equal-Speed ties break randomly, so the bound is ≤/≥ (never
+trades).” Equal-Speed ties break randomly, so the bound is ≤/≥ (never
   strict), and a bound that contradicts the species' possible Speed is
-  discarded rather than producing an inverted range.
+  discarded rather than producing an inverted range. The narrowed range also
+  shows **on the opponent's card**: their Spe stat (and the matchup table's
+  Spe row) tightens to the remembered bounds and is marked amber with a
+  dashed underline (hover: “Speed narrowed from observed move order —
+  remembered from earlier trades”), so the card and the speed line always
+  agree.
 - **A re-entered Pokémon keeps its observed move order.** Evidence recorded
   against `p2a: Garchomp` still applies when the same mon returns as `p2b` —
   the reader reuses the record (same species, same speed versions), so the
@@ -127,6 +131,16 @@ best move, built in stages:
   the set height and scrolls internally. The size survives re-renders and
   page loads (overlay dataset + localStorage), and double-clicking the
   handle resets to the default size.
+- **The panel is movable.** Drag it by its header to park it anywhere on the
+  page (clamped so a corner always stays reachable). The position survives
+  re-renders and page loads like the size does, the ⚡ bring-back button
+  appears where the panel was hidden, and double-clicking the header snaps
+  it back to the default top-right spot. Header buttons never start a drag.
+- **Compact mode.** The ▤ header button collapses the reasoning list to its
+  first line and the matchup table to its Damage row (one line each, with
+  the expanded full-calc panel tucked away), so the panel fits in a corner
+  while you play. The preference persists across re-renders and page loads,
+  and the button stays highlighted while compact is on.
 
 ## Stage 6: screen reading, tera & movepools
 

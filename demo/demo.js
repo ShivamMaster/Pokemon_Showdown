@@ -64,6 +64,8 @@ function render() {
   panel.dataset.rendered = 'true';
   const collapse = panel.querySelector('.psa-collapse');
   collapse.addEventListener('click', () => panel.classList.toggle('psa-collapsed'));
+  const compact = panel.querySelector('.psa-compact');
+  compact.addEventListener('click', () => panel.classList.toggle('psa-compact'));
 
   const mons = state.sides.p1.pokemon.length + state.sides.p2.pokemon.length;
   const adviceFor = snapshot ? `turn ${snapshot.turn}` : 'final state';

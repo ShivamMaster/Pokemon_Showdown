@@ -67,10 +67,37 @@
   flex: 1 1 auto;
   min-height: 0;
   max-height: none;
+}  .psa-panel.psa-collapsed {
+  height: auto !important; /* collapsed always hugs the header */
 }
 
-.psa-panel.psa-collapsed {
-  height: auto !important; /* collapsed always hugs the header */
+/* Compact mode: the reasoning list and the matchup table each collapse to a
+   single line (the first reasoning item; the matchup's Damage row), and the
+   expanded full-calc panel is tucked away. */
+.psa-panel.psa-compact .psa-reasoning {
+  list-style: none;
+  padding-left: 0;
+  margin: 4px 0 0;
+  max-height: 1.4em;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.psa-panel.psa-compact .psa-reasoning li {
+  display: inline;
+}
+
+.psa-panel.psa-compact .psa-reasoning li:not(:first-child) {
+  display: none;
+}
+
+.psa-panel.psa-compact .psa-match-table tr:not(.psa-match-row-dmg) {
+  display: none;
+}
+
+.psa-panel.psa-compact .psa-calc-panel {
+  display: none;
 }
 
 .psa-header {
@@ -80,6 +107,20 @@
   padding: 8px 12px;
   background: #22262f;
   border-bottom: 1px solid var(--psa-border);
+  cursor: grab; /* drag the panel by its header to move it */
+}
+
+.psa-header:active {
+  cursor: grabbing;
+}
+
+.psa-overlay.psa-dragging {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.psa-overlay.psa-dragging .psa-panel {
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
 }
 
 .psa-title {
@@ -96,7 +137,8 @@
   white-space: nowrap;
 }
 
-.psa-collapse {
+.psa-collapse,
+.psa-compact {
   background: #2d323d;
   color: var(--psa-text);
   border: 1px solid var(--psa-border);
@@ -108,8 +150,14 @@
   line-height: 1;
 }
 
-.psa-collapse:hover {
+.psa-collapse:hover,
+.psa-compact:hover {
   background: #3a4150;
+}
+
+.psa-panel.psa-compact .psa-compact {
+  background: rgba(79, 195, 247, 0.22);
+  border-color: var(--psa-accent);
 }
 
 .psa-panel.psa-collapsed .psa-body {
@@ -423,6 +471,14 @@
 
 .psa-stat-exact {
   color: var(--psa-ok);
+}
+
+/* A range narrowed by the species-keyed speed memory (observed move order).
+   Amber + dashed underline echo the "remembered / could be" language used
+   for hidden threats, so it reads as learned, not revealed. */
+.psa-stat-remembered {
+  color: var(--psa-warn);
+  border-bottom: 1px dashed rgba(255, 202, 40, 0.45);
 }
 
 /* Active-matchup comparison: our lead vs their lead, side by side. */

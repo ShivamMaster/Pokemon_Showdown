@@ -31,8 +31,12 @@ const STAT_SHORT = { atk: 'A', def: 'D', spa: 'SA', spd: 'SD', spe: 'S' };
 //   1. exact value (our team's live request / our hover tooltip raw stats),
 //   2. the opponent's hovered Spe range (authoritative EV/nature bounds),
 //   3. the back-calculated EV estimate narrowing the calc range,
-//   4. the plain 0→252 EV calc range (nothing revealed).
-function statRangeOf(gen, mon, stat) {
+//   4. the plain 0→252 EV calc range (nothing revealed),
+//   5. for Spe, the species-keyed speed memory (observed move order against
+//      an exactly-known Speed pins rough base-Speed bounds — same clamp and
+//      discard rule as the engine's effectiveSpeedRange, so the card and the
+//      speed line always agree).
+function statRangeOf(gen, mon, stat, speedMem) {
   if (!mon?.species || !gen) return null;
   const level = mon.level ?? 100;
   if (mon.stats?.[stat] != null) return { min: mon.stats[stat], max: mon.stats[stat], exact: true };
@@ -49,21 +53,32 @@ function statRangeOf(gen, mon, stat) {
       evs: { [stat]: evHi },
       nature: stat === 'spe' ? 'Timid' : 'Serious',
     }).stats[stat];
+    if (stat === 'spe' && speedMem) {
+      const mem = speedMem[mon.species];
+      if (mem && (mem.min != null || mem.max != null)) {
+        const lo = mem.min != null ? Math.max(min, mem.min) : min;
+        const hi = mem.max != null ? Math.min(max, mem.max) : max;
+        // A bound that contradicts the species' possible Speed (which would
+        // invert the range) can only come from a bad observation — discard it.
+        if (lo <= hi) return { min: lo, max: hi, exact: false, remembered: true };
+      }
+    }
     return { min, max, exact: false };
   } catch {
     return null;
   }
 }
 
-function statsOf(gen, mon) {
+function statsOf(gen, mon, speedMem) {
   const out = [];
   for (const s of STAT_KEYS) {
-    const r = statRangeOf(gen, mon, s);
+    const r = statRangeOf(gen, mon, s, speedMem);
     if (!r) continue;
     out.push({
       key: STAT_SHORT[s],
       text: r.min === r.max ? String(r.min) : `${r.min}-${r.max}`,
       exact: r.exact,
+      remembered: !!r.remembered,
       min: r.min,
       max: r.max,
     });
@@ -193,7 +208,7 @@ export function buildPanelModel(state, opts = {}) {
   const cardOf = (mon, showPotential, vsActiveMon = null) => {
     const boosts = Object.fromEntries(Object.entries(mon.boosts ?? {}).filter(([, v]) => v !== 0));
     const hidden = Math.max(0, 4 - (mon.moves?.length ?? 0));
-    const stats = statsOf(gen, mon);
+    const stats = statsOf(gen, mon, state?.speedMemory?.[mon.side]);
     // Predicted-damage comparison vs their active, for switch candidates in
     // the You box. Same matchupDamage source as the matchup's Damage row, so
     // every number agrees everywhere. Only alive bench mons are candidates.
@@ -459,10 +474,11 @@ function renderCard(card) {
     ? `<div class="psa-ev" title="Back-calculated from observed damage">learned ev: ${escapeHtml(card.evLabel)}</div>`
     : '';
   // Stats row: exact numbers for our team (live request / hover), estimated
-  // ranges for theirs — narrowed by the learned EV estimate and hovered Spe.
+  // ranges for theirs — narrowed by the learned EV estimate, hovered Spe, and
+  // the remembered speed from earlier trades.
   const statsHtml = card.stats?.length
     ? `<div class="psa-stats" title="${card.statsExact ? 'Exact stats from your team data (live request / hover)' : 'Estimated stat ranges — they narrow as moves, items, and damage are revealed'}">${card.stats
-        .map((s) => `<span class="psa-stat${s.exact ? ' psa-stat-exact' : ''}">${s.key} ${escapeHtml(s.text)}</span>`)
+        .map((s) => `<span class="psa-stat${s.exact ? ' psa-stat-exact' : ''}${s.remembered ? ' psa-stat-remembered' : ''}"${s.remembered ? ' title="Speed narrowed from observed move order — remembered from earlier trades"' : ''}>${s.key} ${escapeHtml(s.text)}</span>`)
         .join('')}</div>`
     : '';
   const moveText = card.moves
@@ -687,6 +703,7 @@ export function renderPanel(model) {
   <div class="psa-header">
     <span class="psa-title">⚡ Battle Assistant</span>
     <span class="psa-meta">${escapeHtml([model.meta?.format, model.meta?.gametype, `Turn ${model.meta?.turn ?? 0}`].filter(Boolean).join(' · '))}</span>
+    <button class="psa-compact" type="button" title="Compact mode — reasoning and matchup collapse to one line each">▤</button>
     <button class="psa-collapse" type="button" title="Collapse / expand">−</button>
   </div>
   <div class="psa-body">${body}</div>

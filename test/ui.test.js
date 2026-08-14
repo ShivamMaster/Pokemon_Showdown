@@ -103,6 +103,30 @@ test('model: opponent stats are estimated ranges, narrowed by hover + learned EV
   assert.equal(byKey.A, '354-367');
 });
 
+test('model: the speed memory narrows the opponent Spe range on their card', () => {
+  const st = parseLog(realLog);
+  const defaultCard = buildPanelModel(st).them.team.find((c) => c.species === 'Dragonite');
+  assert.equal(defaultCard.stats.find((s) => s.key === 'S').text, '196-284');
+  assert.equal(defaultCard.stats.find((s) => s.key === 'S').remembered, false);
+
+  // Remembered from earlier trades: slower than a 220-Speed mon, faster than
+  // a 205-Speed mon — the Spe range tightens from both ends.
+  st.speedMemory.p2.Dragonite = { min: 205, max: 220, turn: 3 };
+  const m = buildPanelModel(st);
+  const card = m.them.team.find((c) => c.species === 'Dragonite');
+  const s = card.stats.find((x) => x.key === 'S');
+  assert.equal(s.text, '205-220');
+  assert.equal(s.remembered, true);
+  assert.equal(s.exact, false, 'a remembered range is still an estimate');
+  assert.equal(card.statsExact, false);
+
+  // A memory that contradicts the species' possible Speed is discarded.
+  st.speedMemory.p2.Dragonite = { min: 400, max: 500, turn: 3 };
+  const fallback = buildPanelModel(st).them.team.find((c) => c.species === 'Dragonite');
+  assert.equal(fallback.stats.find((x) => x.key === 'S').text, '196-284');
+  assert.equal(fallback.stats.find((x) => x.key === 'S').remembered, false);
+});
+
 test('model: stats are omitted for species the calc does not know', () => {
   const st = parseLog(realLog);
   st.sides.p2.pokemon.push(createPokemon({ ident: 'p2x: Missingno', side: 'p2', species: 'Missingno' }));
@@ -174,6 +198,19 @@ test('render: stats row shows exact values for us and ranges for them', () => {
   assert.ok(html.includes('class="psa-stat">S 109-205</span>'));
 });
 
+test('render: a remembered Spe range is visibly marked on the card', () => {
+  const st = parseLog(realLog);
+  st.speedMemory.p2.Dragonite = { min: null, max: 220, turn: 3 };
+  const html = renderPanel(buildPanelModel(st));
+  // The narrowed range renders with the remembered class + explaining tooltip.
+  assert.ok(html.includes('psa-stat-remembered'));
+  assert.ok(html.includes('S 196-220'));
+  assert.ok(html.includes('title="Speed narrowed from observed move order — remembered from earlier trades"'));
+  // No memory -> no marker.
+  const plain = renderPanel(buildPanelModel(parseLog(realLog)));
+  assert.ok(!plain.includes('psa-stat-remembered'));
+});
+
 test('render: full panel output for the real battle', () => {
   const html = buildPanelHtml(state);
   assert.ok(html.startsWith('<div class="psa-panel"'));
@@ -190,6 +227,7 @@ test('render: full panel output for the real battle', () => {
   assert.ok(html.includes('width:1%')); // Rillaboom HP bar
   assert.ok(html.includes('psa-status-psn'));
   assert.ok(html.includes('psa-collapse'));
+  assert.ok(html.includes('psa-compact')); // compact-mode toggle
   assert.ok(html.includes('psa-resize')); // corner drag handle
   assert.ok(html.includes('psa-log'));
   // Fainted styling on opponent cards.

@@ -418,6 +418,64 @@ try {
     results.toggleOn = true;
   });
 
+  // 5a. Compact mode: the ▤ header button collapses the reasoning list and
+  // the matchup table to one line each (and tucks the full-calc panel away).
+  // The E2E replay has finished (winner set, no active matchup), so feed the
+  // reader a fresh matchup through the same live stepQueue the client uses —
+  // the panel then renders a real matchup to collapse. The preference
+  // persists across a page reload (localStorage).
+  await step('compact', async () => {
+    await page.evaluate(() => {
+      const battle = window.app?.curRoom?.battle;
+      if (!battle || !Array.isArray(battle.stepQueue)) throw new Error('no battle stepQueue');
+      battle.stepQueue.push('|switch|p1a: Snorlax|Snorlax|100/100');
+      battle.stepQueue.push('|switch|p2a: Blissey|Blissey|100/100');
+    });
+    await page.waitForFunction(
+      () => !!document.querySelector('#psa-overlay .psa-matchup'),
+      { timeout: 15000 }
+    );
+    await page.evaluate(() => {
+      const btn = document.querySelector('#psa-overlay .psa-compact');
+      if (!btn) throw new Error('no compact toggle button');
+      btn.click();
+    });
+    await page.waitForFunction(
+      () => document.querySelector('#psa-overlay .psa-panel')?.classList.contains('psa-compact'),
+      { timeout: 10000 }
+    );
+    const state = await page.evaluate(() => {
+      const panel = document.querySelector('#psa-overlay .psa-panel');
+      const visible = (el) => !!el && getComputedStyle(el).display !== 'none';
+      const lis = [...(panel?.querySelectorAll('.psa-reasoning li') ?? [])];
+      const trs = [...(panel?.querySelectorAll('.psa-match-table tr') ?? [])];
+      const dmg = panel?.querySelector('.psa-match-row-dmg');
+      return {
+        compact: panel?.classList.contains('psa-compact') ?? false,
+        hasMatchup: !!panel?.querySelector('.psa-matchup'),
+        matchTrs: trs.length,
+        visibleReasoning: lis.filter(visible).length,
+        visibleMatchRows: trs.filter(visible).length,
+        dmgDisplay: dmg ? getComputedStyle(dmg).display : 'no-dmg-row',
+        calcHidden: !visible(panel?.querySelector('.psa-calc-panel')),
+        panelSample: (panel?.innerText ?? '').slice(0, 180),
+      };
+    });
+    results.compact = state;
+    if (!state.compact || !state.hasMatchup || state.visibleMatchRows !== 1 || state.visibleReasoning > 1 || !state.calcHidden) {
+      throw new Error(`compact mode did not collapse to one line: ${JSON.stringify(state)}`);
+    }
+    // The preference survives a page reload.
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForFunction(
+      () =>
+        document.getElementById('psa-overlay')?.dataset.psaTurn != null &&
+        document.querySelector('#psa-overlay .psa-panel')?.classList.contains('psa-compact'),
+      { timeout: 30000 }
+    );
+    results.compactPersisted = true;
+  });
+
   // 6. Friend aliases: seed a profile named "John" with "vkhss" as an alias;
   // the next battle (replay re-records on load) must land in John's profile,
   // not a fresh "vkhss" one.
