@@ -8,6 +8,8 @@
 // and in the browser (extension content script + demo page). The engine will
 // plug into the recommendation slot later via opts.recommendation.
 
+import { Pokemon } from '@smogon/calc';
+
 const STATUS_LABELS = {
   brn: 'Burn',
   par: 'Paralysis',
@@ -16,6 +18,48 @@ const STATUS_LABELS = {
   psn: 'Poison',
   tox: 'Toxic',
 };
+
+// Stat display: short labels and the display order.
+const STAT_KEYS = ['atk', 'def', 'spa', 'spd', 'spe'];
+const STAT_SHORT = { atk: 'A', def: 'D', spa: 'SA', spd: 'SD', spe: 'S' };
+
+// Best-known range for one stat of a Pokémon, for the card's stats row:
+//   1. exact value (our team's live request / our hover tooltip raw stats),
+//   2. the opponent's hovered Spe range (authoritative EV/nature bounds),
+//   3. the back-calculated EV estimate narrowing the calc range,
+//   4. the plain 0→252 EV calc range (nothing revealed).
+function statRangeOf(gen, mon, stat) {
+  if (!mon?.species || !gen) return null;
+  const level = mon.level ?? 100;
+  if (mon.stats?.[stat] != null) return { min: mon.stats[stat], max: mon.stats[stat], exact: true };
+  if (stat === 'spe' && mon.speedRange?.min != null && mon.speedRange?.max != null) {
+    return { min: mon.speedRange.min, max: mon.speedRange.max, exact: false };
+  }
+  const ev = mon.evEstimate?.[stat];
+  const evLo = ev ? ev[0] : 0;
+  const evHi = ev ? ev[1] : 252;
+  try {
+    const min = new Pokemon(gen, mon.species, { level, evs: { [stat]: evLo }, nature: 'Serious' }).stats[stat];
+    const max = new Pokemon(gen, mon.species, {
+      level,
+      evs: { [stat]: evHi },
+      nature: stat === 'spe' ? 'Timid' : 'Serious',
+    }).stats[stat];
+    return { min, max, exact: false };
+  } catch {
+    return null;
+  }
+}
+
+function statsOf(gen, mon) {
+  const out = [];
+  for (const s of STAT_KEYS) {
+    const r = statRangeOf(gen, mon, s);
+    if (!r) continue;
+    out.push({ key: STAT_SHORT[s], text: r.min === r.max ? String(r.min) : `${r.min}-${r.max}`, exact: r.exact });
+  }
+  return out.length ? out : null;
+}
 
 export function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({
@@ -35,6 +79,7 @@ export function buildPanelModel(state, opts = {}) {
   const ourSideId = opts.ourSideId ?? 'p1';
   const ourSide = state?.sides?.[ourSideId] ?? null;
   const theirSide = ourSideId === 'p1' ? state?.sides?.p2 ?? null : state?.sides?.p1 ?? null;
+  const gen = state?.gen ?? 9;
 
   const empty = !(ourSide?.pokemon?.length || theirSide?.pokemon?.length);
 
@@ -60,6 +105,7 @@ export function buildPanelModel(state, opts = {}) {
   const cardOf = (mon, showPotential) => {
     const boosts = Object.fromEntries(Object.entries(mon.boosts ?? {}).filter(([, v]) => v !== 0));
     const hidden = Math.max(0, 4 - (mon.moves?.length ?? 0));
+    const stats = statsOf(gen, mon);
     return {
       ident: mon.ident,
       species: mon.species,
@@ -81,6 +127,8 @@ export function buildPanelModel(state, opts = {}) {
       hiddenCount: hidden,
       observed: !!mon.observed,
       evLabel: evLabelOf(mon),
+      stats,
+      statsExact: !!(stats && stats.every((s) => s.exact)),
       boosts,
       switchCount: mon.switchCount ?? 0,
       potential:
@@ -233,6 +281,13 @@ function renderCard(card) {
   const evHtml = card.evLabel
     ? `<div class="psa-ev" title="Back-calculated from observed damage">learned ev: ${escapeHtml(card.evLabel)}</div>`
     : '';
+  // Stats row: exact numbers for our team (live request / hover), estimated
+  // ranges for theirs — narrowed by the learned EV estimate and hovered Spe.
+  const statsHtml = card.stats?.length
+    ? `<div class="psa-stats" title="${card.statsExact ? 'Exact stats from your team data (live request / hover)' : 'Estimated stat ranges — they narrow as moves, items, and damage are revealed'}">${card.stats
+        .map((s) => `<span class="psa-stat${s.exact ? ' psa-stat-exact' : ''}">${s.key} ${escapeHtml(s.text)}</span>`)
+        .join('')}</div>`
+    : '';
   const moveText = card.moves
     .map((m) => {
       const pp = card.movePp?.[m];
@@ -258,6 +313,7 @@ function renderCard(card) {
   </div>
   ${hpBar(card.hpPercent)}
   <div class="psa-card-hp">${card.hpPercent != null ? `${card.hpPercent}%` : '<span class="psa-muted">??</span>'}</div>
+  ${statsHtml}
   <div class="psa-card-moves">${movesHtml}</div>
   ${potentialHtml}
   <div class="psa-card-details">${escapeHtml(details)}</div>

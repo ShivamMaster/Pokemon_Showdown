@@ -355,6 +355,24 @@
   margin-bottom: 3px;
 }
 
+/* Stats row: exact values for our team, estimated ranges for theirs. */
+.psa-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 7px;
+  font-size: 10.5px;
+  color: var(--psa-muted);
+  margin-bottom: 3px;
+}
+
+.psa-stat {
+  white-space: nowrap;
+}
+
+.psa-stat-exact {
+  color: var(--psa-ok);
+}
+
 .psa-card-moves {
   font-size: 12px;
   word-break: break-word;

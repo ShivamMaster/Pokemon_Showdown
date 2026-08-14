@@ -24,8 +24,13 @@ import { displayMoveName, displayAbilityName, displayItemName } from './movename
 const PIVOT_MOVES = new Set(['Volt Switch', 'U-turn', 'Flip Turn', 'Teleport', 'Parting Shot']);
 
 // Speed-relevant item names — revealing/consuming them changes the speed
-// relationship, so speed evidence taken before must be discarded.
-const SPEED_ITEMS = new Set(['Choice Scarf', 'Iron Ball']);
+// relationship, so speed evidence taken before must be discarded. (Room
+// Service is here for the reveal; its actual Speed drop arrives as a normal
+// -1 Spe boost line, which bumps speVersion on its own.)
+const SPEED_ITEMS = new Set([
+  'Choice Scarf', 'Iron Ball', 'Lagging Tail', 'Room Service', 'Quick Powder',
+  'Macho Brace', 'Power Anklet', 'Power Band', 'Power Belt', 'Power Bracer', 'Power Lens', 'Power Weight',
+]);
 
 // Priority data the calc is missing (Grassy Glide is +1 priority, but only in
 // Grassy Terrain — the calc table doesn't record it).
@@ -521,6 +526,12 @@ export class BattleReader {
     if (SPEED_ITEMS.has(item)) mon.speVersion += 1;
   }
 
+  // Item reveals that don't go through _applyItem (activate lines, damage
+  // `[from] item:` extras, hover tooltips) must still invalidate evidence.
+  _bumpSpeIfSpeedItem(mon, itemName) {
+    if (mon && SPEED_ITEMS.has(itemName)) mon.speVersion += 1;
+  }
+
   _applyAbility(event) {
     const ident = event.args[0];
     const mon = getPokemon(this.state, ident);
@@ -543,8 +554,10 @@ export class BattleReader {
     if (effect.startsWith('ability:')) mon.ability = effect.slice('ability:'.length).trim();
     else if (effect.startsWith('move:')) addMove(mon, effect.slice('move:'.length).trim());
     else if (effect.startsWith('item:')) {
-      mon.item = effect.slice('item:'.length).trim();
+      const item = effect.slice('item:'.length).trim();
+      mon.item = item;
       mon.itemRevealed = true;
+      this._bumpSpeIfSpeedItem(mon, item);
     }
   }
 
@@ -713,11 +726,13 @@ export class BattleReader {
       mon.item = obs.item;
       mon.itemRevealed = true;
       changes.item = true;
+      this._bumpSpeIfSpeedItem(mon, obs.item);
     }
     if (obs.itemConsumed) mon.itemConsumed = true;
     if (obs.ability && !mon.ability) {
       mon.ability = obs.ability;
       changes.ability = true;
+      mon.speVersion += 1; // abilities decide the speed equation
     }
     if (obs.teraType && !mon.teraType) {
       mon.teraType = obs.teraType;
@@ -766,10 +781,14 @@ export class BattleReader {
       const m = /^\[from\] (item|ability): (.+)$/.exec(extra ?? '');
       if (!m) continue;
       if (m[1] === 'item') {
-        mon.item = m[2].trim();
+        const item = m[2].trim();
+        mon.item = item;
         mon.itemRevealed = true;
-      } else {
+        this._bumpSpeIfSpeedItem(mon, item);
+      } else if (m[2].trim() && m[2].trim() !== mon.ability) {
         mon.ability = m[2].trim();
+        // Abilities decide the speed equation — conservative invalidation.
+        mon.speVersion += 1;
       }
     }
   }

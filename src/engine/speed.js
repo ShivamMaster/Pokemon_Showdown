@@ -26,6 +26,20 @@ function boostMult(stage) {
   return 2 / (2 - stage);
 }
 
+// Items that halve the holder's Speed while held (EV-training / gimmick items
+// plus Iron Ball).
+const SPEED_HALVING_ITEMS = new Set([
+  'Iron Ball', 'Macho Brace',
+  'Power Anklet', 'Power Band', 'Power Belt', 'Power Bracer', 'Power Lens', 'Power Weight',
+]);
+
+// Lagging Tail is different: it doesn't touch the Speed stat at all — it
+// makes the holder move LAST within its priority bracket (priority -0.1), no
+// matter how fast it is or whether Trick Room is active.
+export function holdsLaggingTail(mon) {
+  return !!mon && mon.itemRevealed && !mon.itemConsumed && mon.item === 'Lagging Tail';
+}
+
 // Effective Speed range for a mon, using the info the reader knows.
 // `sideId` is the mon's side ('p1'/'p2') so per-side effects (Tailwind) apply.
 //
@@ -73,14 +87,21 @@ export function effectiveSpeedRange(gen, mon, state, sideId) {
     max *= 0.5;
   }
 
-  // Choice Scarf multiplies Speed by 1.5 and Iron Ball halves it (only while
-  // actually held).
-  if (mon.itemRevealed && !mon.itemConsumed && mon.item === 'Choice Scarf') {
-    min *= 1.5;
-    max *= 1.5;
-  } else if (mon.itemRevealed && !mon.itemConsumed && mon.item === 'Iron Ball') {
-    min *= 0.5;
-    max *= 0.5;
+  // Item multipliers while actually held: Choice Scarf ×1.5, halving items
+  // ×0.5, Quick Powder ×2 for an untransformed Ditto. (Room Service is not
+  // here: its Speed drop arrives as a normal -1 Spe boost line in the log,
+  // which the reader tracks and the boost multiplier above applies.)
+  if (mon.itemRevealed && !mon.itemConsumed) {
+    if (mon.item === 'Choice Scarf') {
+      min *= 1.5;
+      max *= 1.5;
+    } else if (SPEED_HALVING_ITEMS.has(mon.item)) {
+      min *= 0.5;
+      max *= 0.5;
+    } else if (mon.item === 'Quick Powder' && mon.species === 'Ditto') {
+      min *= 2;
+      max *= 2;
+    }
   }
 
   // Weather / terrain abilities (only when the ability itself is revealed).
@@ -156,7 +177,18 @@ export function speedOrder(ours, theirs, gen, state, ourSideId) {
     weMoveFirst = evidence.fasterSide === ourSideId;
   }
 
-  return { weMoveFirst, oursRange, theirsRange, trickRoom, observed };
+  // Lagging Tail: the holder moves last within its priority bracket, so if
+  // exactly one side holds it, that decides the order outright — regardless
+  // of Speed, boosts, items, or Trick Room. (If both hold it, Speed decides
+  // between them, so the calculation above stands.)
+  const ourLag = holdsLaggingTail(ours);
+  const theirLag = holdsLaggingTail(theirs);
+  const laggingTail = ourLag || theirLag;
+  if (ourLag !== theirLag) {
+    weMoveFirst = ourLag ? false : true;
+  }
+
+  return { weMoveFirst, oursRange, theirsRange, trickRoom, observed, laggingTail };
 }
 
 // A short human line describing the speed situation, e.g.
@@ -171,6 +203,16 @@ export function speedLine(ours, theirs, gen, state, ourSideId) {
   const { oursRange, theirsRange, trickRoom, observed } = order;
   const fmt = (r) => (r.min === r.max ? String(r.min) : `${r.min}-${r.max}`);
   const tr = trickRoom ? ' (Trick Room: slower moves first)' : '';
+  const ourLag = holdsLaggingTail(ours);
+  const theirLag = holdsLaggingTail(theirs);
+  // Lagging Tail overrides everything — say so plainly instead of quoting
+  // speed numbers that no longer decide the order.
+  if (ourLag !== theirLag) {
+    if (ourLag) {
+      return `You hold Lagging Tail — their ${theirs?.species} moves first regardless of Speed.`;
+    }
+    return `Their ${theirs?.species} holds Lagging Tail — you move first regardless of Speed.`;
+  }
   if (order.weMoveFirst === true) {
     const obs = observed ? ' — observed: you moved first when you last traded moves' : '';
     return `You outspeed their ${theirs?.species} (${fmt(oursRange)} vs ${fmt(theirsRange)}) — you move first${obs}${tr}.`;

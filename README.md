@@ -74,6 +74,13 @@ best move, built in stages:
   (team-preview order for the opponent, request order for you). Empty slots
   are dashed placeholders (`not revealed yet`) that fill in as Pokémon are
   revealed, so you can see the whole picture at a glance.
+- **Stats on every card** — each box shows a compact stat row
+  (`A 172 · D 111 · SA 81 · SD 101 · S 141`): **exact values for your team**
+  (the live `|request|` carries your true stats, so they appear the moment
+  the battle loads) and **estimated ranges for the opponent** (0→252 EV
+  bounds, which tighten as you hover their Pokémon for the exact Spe range
+  and as the stat estimator back-calculates their EVs from damage). Your
+  exact numbers render in green so the two are distinguishable at a glance.
 - **Potential moves on the grid** — each opponent card with unrevealed
   moves shows `could have: …` (top candidates from the Gen 9 learnsets),
   so as they reveal their team you see both what they've shown and what
@@ -417,9 +424,17 @@ and factors the outcome into the advice:
 - The opponent's hover tooltip shows their **exact Spe range**
   (`Spe 139–186–249–273`), which replaces the engine's generic estimate.
 - The reader's known modifiers are applied: **boost stages**, **paralysis**
-  (halved), **Choice Scarf** (×1.5) / **Iron Ball** (×0.5) while held,
-  weather-based abilities (Swift Swim in rain, Chlorophyll in sun, …),
-  **Tailwind** per side, and **Trick Room** (which flips the comparison).
+  (halved), speed items while held — **Choice Scarf** (×1.5), **Iron Ball** /
+  **Macho Brace** / **Power items** (×0.5), **Quick Powder** (×2 on an
+  untransformed Ditto) — weather-based abilities (Swift Swim in rain,
+  Chlorophyll in sun, …), **Tailwind** per side, and **Trick Room** (which
+  flips the comparison). **Room Service** needs no special code: its Speed
+  drop arrives as a normal −1 Spe boost in the log and flows through the
+  boost tracking.
+- **Lagging Tail is an ordering rule, not a stat**: the holder moves last
+  within its priority bracket no matter how fast it is (and even under Trick
+  Room). If exactly one side holds it, the engine says so outright — “Their
+  Deoxys-Speed holds Lagging Tail — you move first regardless of Speed.”
 - In move evaluation: going for a KO while outspeeding gets a bonus; a move
   that risks being KO'd before it lands (they outspeed and can KO) is
   penalized and called out.

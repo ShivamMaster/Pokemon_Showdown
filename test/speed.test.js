@@ -164,6 +164,31 @@ test('speed: exact stat + Iron Ball = point', () => {
   assert.deepEqual(effectiveSpeedRange(9, mon, state, 'p1'), { min: Math.round(165 * 0.5), max: Math.round(165 * 0.5) });
 });
 
+test('speed: Macho Brace and Power items halve speed like Iron Ball', () => {
+  const state = baseState();
+  for (const item of ['Macho Brace', 'Power Anklet', 'Power Band', 'Power Belt', 'Power Bracer', 'Power Lens', 'Power Weight']) {
+    const mon = makeMon('Raging Bolt', { item });
+    const r = effectiveSpeedRange(9, mon, state, 'p1');
+    assert.equal(r.min, Math.round(186 * 0.5), `${item} should halve speed`);
+    assert.equal(r.max, Math.round(273 * 0.5), `${item} should halve speed`);
+  }
+  // Consumed = no effect (same as Choice Scarf).
+  const eaten = makeMon('Raging Bolt', { item: 'Macho Brace', itemConsumed: true });
+  assert.equal(effectiveSpeedRange(9, eaten, state, 'p1').min, 186);
+});
+
+test('speed: Quick Powder doubles an untransformed Ditto only', () => {
+  const state = baseState();
+  const ditto = makeMon('Ditto', { item: 'Quick Powder' });
+  const base = effectiveSpeedRange(9, makeMon('Ditto'), state, 'p1');
+  const r = effectiveSpeedRange(9, ditto, state, 'p1');
+  assert.equal(r.min, base.min * 2);
+  assert.equal(r.max, base.max * 2);
+  // Any other species: no effect.
+  const notDitto = makeMon('Raging Bolt', { item: 'Quick Powder' });
+  assert.equal(effectiveSpeedRange(9, notDitto, state, 'p1').min, 186);
+});
+
 // ---------------------------------------------------------------------------
 // speedOrder decisiveness
 // ---------------------------------------------------------------------------
@@ -259,6 +284,38 @@ test('speed: evidence is ignored when anything speed-affecting changed since', (
   order = push(state, ours, theirs, () => { state.sides.p1.effects.Reflect = 1; });
   assert.equal(order.observed, true);
   assert.equal(order.weMoveFirst, false);
+});
+
+test('speed: Lagging Tail makes the holder move last regardless of Speed', () => {
+  const state = baseState();
+  const fast = makeMon('Deoxys-Speed');   // base 150
+  const slow = makeMon('Ferrothorn');     // base 20
+  // Normally Deoxys decisively outspeeds Ferrothorn…
+  assert.equal(speedOrder(fast, slow, 9, state, 'p1').weMoveFirst, true);
+  // …but if the FAST one holds Lagging Tail, it moves last anyway.
+  const laggingFast = makeMon('Deoxys-Speed', { item: 'Lagging Tail' });
+  const order = speedOrder(laggingFast, slow, 9, state, 'p1');
+  assert.equal(order.weMoveFirst, false);
+  assert.equal(order.laggingTail, true);
+  // The slow non-holder holding it changes nothing about the fast one winning.
+  const laggingSlow = makeMon('Ferrothorn', { item: 'Lagging Tail' });
+  assert.equal(speedOrder(fast, laggingSlow, 9, state, 'p1').weMoveFirst, true);
+  // Both holding it: Speed decides between them again.
+  assert.equal(speedOrder(laggingFast, laggingSlow, 9, state, 'p1').weMoveFirst, true);
+  // Trick Room does NOT rescue the Lagging Tail holder — it still moves last.
+  state.field.effects['Trick Room'] = 1;
+  state.field.speVersion += 1;
+  assert.equal(speedOrder(laggingFast, slow, 9, state, 'p1').weMoveFirst, false);
+});
+
+test('speed: Lagging Tail overrides a decisive edge and the line says so', () => {
+  const state = baseState();
+  const ours = makeMon('Ferrothorn');
+  const theirs = makeMon('Deoxys-Speed', { item: 'Lagging Tail' });
+  const line = speedLine(ours, theirs, 9, state, 'p1');
+  assert.match(line, /Their Deoxys-Speed holds Lagging Tail — you move first regardless of Speed/);
+  const line2 = speedLine(theirs, ours, 9, state, 'p1');
+  assert.match(line2, /You hold Lagging Tail — their Ferrothorn moves first regardless of Speed/);
 });
 
 test('speed: observed order also wins under Trick Room', () => {

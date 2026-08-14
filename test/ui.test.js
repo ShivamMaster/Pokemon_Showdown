@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 import { parseLog } from '../src/reader/reader.js';
+import { createPokemon } from '../src/reader/state.js';
 import { buildPanelModel, renderPanel, buildPanelHtml, escapeHtml } from '../src/ui/panel.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -67,6 +68,49 @@ test('model: HP, status, moves, hidden counts, items', () => {
   assert.equal(m.us.team.filter((c) => c.fainted).length, 5);
 });
 
+test('model: our exact stats come from the live request / hover (points)', () => {
+  const st = parseLog(realLog);
+  const rill = st.sides.p1.pokemon.find((m) => m.species === 'Rillaboom');
+  rill.stats = { atk: 172, def: 111, spa: 81, spd: 101, spe: 141 };
+  const m = buildPanelModel(st);
+  const card = m.us.team.find((c) => c.species === 'Rillaboom');
+  assert.equal(card.statsExact, true);
+  assert.deepEqual(
+    card.stats.map((s) => [s.key, s.text, s.exact]),
+    [
+      ['A', '172', true],
+      ['D', '111', true],
+      ['SA', '81', true],
+      ['SD', '101', true],
+      ['S', '141', true],
+    ]
+  );
+});
+
+test('model: opponent stats are estimated ranges, narrowed by hover + learned EV', () => {
+  const st = parseLog(realLog);
+  const dn = st.sides.p2.pokemon.find((m) => m.species === 'Dragonite');
+  dn.speedRange = { min: 109, max: 205 }; // hovered Spe bounds
+  dn.evEstimate = { atk: [200, 252], spa: [0, 252], def: [0, 252], spd: [0, 252], hp: [0, 252] };
+  const m = buildPanelModel(st);
+  const card = m.them.team.find((c) => c.species === 'Dragonite');
+  assert.equal(card.statsExact, false);
+  const byKey = Object.fromEntries(card.stats.map((s) => [s.key, s.text]));
+  // The learned Atk EV range [200,252] narrows the calc range to a point-ish
+  // band; the hovered Spe range replaces the generic estimate.
+  assert.equal(byKey.S, '109-205');
+  assert.notEqual(byKey.A, '203-310'); // default 0-252 EV range for base-134 Atk
+  assert.equal(byKey.A, '354-367');
+});
+
+test('model: stats are omitted for species the calc does not know', () => {
+  const st = parseLog(realLog);
+  st.sides.p2.pokemon.push(createPokemon({ ident: 'p2x: Missingno', side: 'p2', species: 'Missingno' }));
+  const m = buildPanelModel(st);
+  const card = m.them.team.find((c) => c.species === 'Missingno');
+  assert.equal(card.stats, null);
+});
+
 test('model: field, side effects, and the action journal', () => {
   const m = buildPanelModel(state);
   assert.ok(m.field.includes('terrain: Grassy Terrain'));
@@ -115,6 +159,20 @@ test('render: recommendation confidence badges are shown', () => {
 // ---------------------------------------------------------------------------
 // HTML rendering
 // ---------------------------------------------------------------------------
+
+test('render: stats row shows exact values for us and ranges for them', () => {
+  const st = parseLog(realLog);
+  const rill = st.sides.p1.pokemon.find((m) => m.species === 'Rillaboom');
+  rill.stats = { atk: 172, def: 111, spa: 81, spd: 101, spe: 141 };
+  const dn = st.sides.p2.pokemon.find((m) => m.species === 'Dragonite');
+  dn.speedRange = { min: 109, max: 205 };
+  const html = renderPanel(buildPanelModel(st));
+  // Our exact stats render with the exact-tint class.
+  assert.ok(html.includes('class="psa-stat psa-stat-exact">A 172</span>'));
+  assert.ok(html.includes('>S 141</span>'));
+  // Their Spe uses the hovered range and renders as a plain estimate.
+  assert.ok(html.includes('class="psa-stat">S 109-205</span>'));
+});
 
 test('render: full panel output for the real battle', () => {
   const html = buildPanelHtml(state);

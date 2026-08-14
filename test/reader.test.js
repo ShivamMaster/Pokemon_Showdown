@@ -7,6 +7,7 @@ import path from 'node:path';
 
 import { parseLog, parseDetails, parseHp, sideOf, BattleReader } from '../src/reader/reader.js';
 import { parseLine } from '../src/reader/parser.js';
+import { effectiveSpeedRange } from '../src/engine/speed.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const realLog = readFileSync(path.join(__dirname, 'fixtures', 'real-battle.log'), 'utf8');
@@ -413,6 +414,22 @@ test('speed versions: speed-relevant changes bump the counters', () => {
   assert.equal(mon().speVersion, 3, 'a Choice Scarf reveal invalidates evidence');
   reader.applyLine('|-item|p2a: Gengar|Leftovers');
   assert.equal(mon().speVersion, 3, 'an unrelated item does not');
+  // The other speed-affecting items invalidate evidence too.
+  let n = mon().speVersion;
+  for (const item of ['Lagging Tail', 'Room Service', 'Quick Powder', 'Macho Brace', 'Power Anklet']) {
+    reader.applyLine(`|-item|p1a: Pikachu|${item}`);
+    assert.equal(mon().speVersion, n + 1, `${item} reveal should invalidate evidence`);
+    n += 1;
+  }
+  // Tooltip reveals (the observation path) bump the same way — use a fresh
+  // mon whose item/ability aren't revealed yet.
+  reader.applyLine('|-switch|p1b: Snorlax|Snorlax|100/100');
+  const fresh = () => reader.state.sides.p1.pokemon.find((p) => p.species === 'Snorlax');
+  assert.equal(fresh().speVersion, 0);
+  reader.applyObservation(fresh(), { species: 'Snorlax', item: 'Iron Ball' });
+  assert.equal(fresh().speVersion, 1, 'a hover-revealed Iron Ball should invalidate evidence');
+  reader.applyObservation(fresh(), { species: 'Snorlax', ability: 'Thick Fat' });
+  assert.equal(fresh().speVersion, 2, 'a hover-revealed ability should invalidate evidence');
 
   assert.equal(reader.state.field.speVersion, 0);
   reader.applyLine('|-weather|RainDance');
@@ -545,6 +562,31 @@ test('applyRequest (parsed object) + switch ident merge: no duplicate records', 
   const kg = our.pokemon.find((m) => m.species === 'Kingambit');
   assert.deepEqual(kg.moves, ['Sucker Punch']);
   assert.equal(kg.item, 'Leftovers');
+});
+
+test('Room Service: the -1 Spe boost and consumption flow through the log', () => {
+  // Room Service has no special speed code: when it triggers, the log shows a
+  // normal -1 Spe boost and the item is consumed — the reader must track both,
+  // and the speed engine must apply the -1 stage on top of the base range.
+  const reader = new BattleReader();
+  reader.applyLine('|player|p1|Me');
+  reader.applyLine('|switch|p1a: Hatterene|Hatterene|100/100');
+  reader.applyLine('|switch|p2a: Oranguru|Oranguru|100/100');
+  reader.applyLine('|gen|9');
+  const hat = () => reader.state.sides.p1.pokemon[0];
+  reader.applyLine('|-item|p1a: Hatterene|Room Service');
+  reader.applyLine('|-fieldstart|move: Trick Room');
+  const before = hat().speVersion;
+  reader.applyLine('|-boost|p1a: Hatterene|spe|-1|[from] item: Room Service');
+  assert.equal(hat().boosts.spe, -1);
+  assert.equal(hat().speVersion, before + 1, 'the Spe drop invalidates evidence');
+  reader.applyLine('|-enditem|p1a: Hatterene|Room Service');
+  assert.equal(hat().item, 'Room Service');
+  assert.equal(hat().itemConsumed, true);
+  // Hatterene base 29 Spe: 0 EV = 94, 252+Timid = 172; -1 stage = 2/3 of that.
+  const r = effectiveSpeedRange(9, hat(), reader.state, 'p1');
+  assert.equal(r.min, Math.round(94 * (2 / 3)));
+  assert.equal(r.max, Math.round(172 * (2 / 3)));
 });
 
 test('request ingests our exact stats (Speed becomes a point)', () => {
