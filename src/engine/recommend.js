@@ -131,6 +131,9 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
   if (vsTarget.category === 'Status') {
     const util = utilityScore(moveName);
     if (!util) return null;
+    // A status-inflicting move (Thunder Wave, Will-O-Wisp, Toxic, …) does
+    // nothing if the target is already statused — never keep recommending it.
+    if (STATUS_MOVES.has(moveName) && theirTarget?.status) return null;
     let value = util.value;
     let note = util.note;
     if (RECOVERY_MOVES.has(moveName)) {
@@ -452,6 +455,18 @@ export function recommend(state, opts = {}) {
   if (!bestMove && bestSwitch) {
     switchTo = { ident: bestSwitch.ident, species: bestSwitch.species, score: switchValue, note: bestSwitch.note };
   }
+  // Status-setup pivot: a status move (Thunder Wave, Toxic, …) deals no
+  // damage, so when it's our best option the real play is "inflict the status
+  // this turn, then switch to the damage dealer next turn". Recommend the
+  // switch as that follow-up whenever a worthwhile pivot exists.
+  if (!switchTo && bestMove?.kind === 'status' && STATUS_MOVES.has(bestMove.move) && bestSwitch && bestSwitch.net > 5) {
+    switchTo = {
+      ident: bestSwitch.ident,
+      species: bestSwitch.species,
+      score: bestSwitch.net,
+      note: `After ${bestMove.move} on ${theirTarget.species}, ${bestSwitch.note.replace(/^Switch to /, 'switch to ')}`,
+    };
+  }
 
   if (bestMove) {
     reasoning.push(bestMove.note);
@@ -459,6 +474,9 @@ export function recommend(state, opts = {}) {
       reasoning.push(bestMove.koGuaranteed
         ? `The move guarantees a KO on ${theirTarget.species}.`
         : `The move can KO ${theirTarget.species} — worth the risk.`);
+    }
+    if (STATUS_MOVES.has(bestMove.move) && switchTo) {
+      reasoning.push(`Set up ${bestMove.move} on ${theirTarget.species} this turn, then pivot to ${switchTo.species} next turn.`);
     }
   } else if (!switchTo) {
     reasoning.push('No usable moves are known — consider switching.');
@@ -511,11 +529,27 @@ export function recommend(state, opts = {}) {
     reasoning.push(`Your ${ourActive.species} has ${ourActive.moves.length} moves known from this log.`);
   }
 
+  // Confidence: how strongly this option is preferred over its alternative.
+  // The best move's confidence is its share vs the runner-up move (100% when
+  // it's the only option); the switch's confidence is its share vs using the
+  // best move (100% when there is no move to compare against).
+  let moveConfidence = 100;
+  const runnerUp = moveEvals[1] ?? null;
+  if (bestMove && runnerUp && runnerUp.score > 0) {
+    moveConfidence = Math.round((bestMove.score / (bestMove.score + runnerUp.score)) * 100);
+  }
+  let switchConfidence = null;
+  if (switchTo) {
+    const alt = bestMove?.score ?? 0;
+    const total = switchTo.score + alt;
+    switchConfidence = total > 0 ? Math.round((switchTo.score / total) * 100) : 100;
+  }
+
   return {
     bestMove: bestMove
-      ? { move: bestMove.move, score: bestMove.score, note: bestMove.note, expected: bestMove.expected }
+      ? { move: bestMove.move, score: bestMove.score, note: bestMove.note, expected: bestMove.expected, confidence: moveConfidence }
       : null,
-    switchTo,
+    switchTo: switchTo ? { ...switchTo, confidence: switchConfidence } : null,
     reasoning: reasoning.slice(0, 6),
     note: null,
   };

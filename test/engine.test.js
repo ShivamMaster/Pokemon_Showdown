@@ -237,6 +237,63 @@ test('utilityScore: known utility moves score, damaging moves do not', () => {
   assert.equal(utilityScore('Earthquake'), null);
 });
 
+test('engine: a status move is not recommended when the target is already statused', () => {
+  const state = makeState({
+    ourActive: { species: 'Chansey', hpPercent: 100, moves: ['Thunder Wave', 'Soft-Boiled', 'Seismic Toss'] },
+    theirActive: { species: 'Gliscor', hpPercent: 100, status: 'par', moves: ['Earthquake', 'Roost'] },
+  });
+  const rec = recommend(state);
+  assert.notEqual(rec.bestMove.move, 'Thunder Wave', 'paralyzed target — Thunder Wave does nothing');
+});
+
+test('engine: status-then-switch pivot is recommended for a status wall', () => {
+  const state = makeState({
+    ourActive: { species: 'Chansey', hpPercent: 100, moves: ['Thunder Wave', 'Soft-Boiled'] },
+    theirActive: { species: 'Gliscor', hpPercent: 100, moves: ['Earthquake', 'Roost'] },
+    ourBench: [{ species: 'Garchomp', hpPercent: 100, moves: ['Earthquake', 'Stone Edge'] }],
+  });
+  const rec = recommend(state);
+  // Thunder Wave is the move this turn, and the switch is the follow-up plan.
+  assert.equal(rec.bestMove.move, 'Thunder Wave');
+  assert.equal(rec.switchTo.species, 'Garchomp');
+  assert.ok(rec.switchTo.note.startsWith('After Thunder Wave on Gliscor'));
+  assert.ok(rec.reasoning.some((r) => r.includes('pivot to Garchomp next turn')));
+});
+
+test('engine: move confidence is the share vs the runner-up (100% when alone)', () => {
+  const solo = makeState({
+    ourActive: { species: 'Chansey', hpPercent: 100, moves: ['Thunder Wave'] },
+    theirActive: { species: 'Gliscor', hpPercent: 100, moves: ['Earthquake'] },
+  });
+  assert.equal(recommend(solo).bestMove.confidence, 100);
+
+  const paired = makeState({
+    ourActive: { species: 'Charizard', hpPercent: 100, moves: ['Fire Blast', 'Air Slash'] },
+    theirActive: { species: 'Ferrothorn', hpPercent: 100, moves: ['Gyro Ball'] },
+  });
+  const rec = recommend(paired);
+  // Fire Blast (4× vs Grass/Steel) should vastly outrank Air Slash (1×).
+  assert.ok(rec.bestMove.confidence >= 80, `expected high confidence, got ${rec.bestMove.confidence}`);
+  assert.ok(rec.bestMove.confidence <= 100);
+});
+
+test('engine: switch confidence is its share vs the best move', () => {
+  const state = makeState({
+    ourActive: { species: 'Chansey', hpPercent: 100, moves: ['Thunder Wave', 'Soft-Boiled'] },
+    theirActive: { species: 'Gliscor', hpPercent: 100, moves: ['Earthquake', 'Roost'] },
+    ourBench: [{ species: 'Garchomp', hpPercent: 100, moves: ['Earthquake', 'Stone Edge'] }],
+  });
+  const rec = recommend(state);
+  assert.ok(rec.switchTo.confidence > 0 && rec.switchTo.confidence < 100, 'switch shares the split with the move');
+  // When there is no move at all, the switch is the only option: 100%.
+  const forced = makeState({
+    ourActive: { species: 'Chansey', hpPercent: 100, moves: ['Thunder Wave'] },
+    theirActive: { species: 'Gliscor', hpPercent: 100, status: 'par', moves: ['Earthquake'] },
+    ourBench: [{ species: 'Garchomp', hpPercent: 100, moves: ['Earthquake'] }],
+  });
+  assert.equal(recommend(forced).switchTo.confidence, 100);
+});
+
 test('engine: recovery is not recommended at full HP', () => {
   const state = makeState({
     ourActive: { species: 'Empoleon', hpPercent: 100, moves: ['Roost', 'Hydro Pump', 'Ice Beam'] },

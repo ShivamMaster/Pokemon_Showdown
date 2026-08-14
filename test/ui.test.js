@@ -95,6 +95,23 @@ test('model: recommendation slot is a clean contract for the engine', () => {
   assert.ok(html.includes('Covers their likely switch-in'));
 });
 
+test('render: recommendation confidence badges are shown', () => {
+  const rec = {
+    bestMove: { move: 'Thunder Wave', confidence: 72 },
+    switchTo: { species: 'Garchomp', confidence: 28 },
+    reasoning: [],
+    note: null,
+  };
+  const html = renderPanel(buildPanelModel(state, { recommendation: rec }));
+  assert.ok(html.includes('Thunder Wave'), 'move name shown');
+  assert.ok(html.includes('psa-rec-conf'), 'confidence badge markup present');
+  assert.ok(html.includes('>72%<'), 'move confidence rendered');
+  assert.ok(html.includes('>28%<'), 'switch confidence rendered');
+  // No confidence -> no badge.
+  const plain = renderPanel(buildPanelModel(state, { recommendation: { bestMove: { move: 'Earthquake' }, switchTo: null, reasoning: [], note: null } }));
+  assert.ok(!plain.includes('psa-rec-conf'));
+});
+
 // ---------------------------------------------------------------------------
 // HTML rendering
 // ---------------------------------------------------------------------------

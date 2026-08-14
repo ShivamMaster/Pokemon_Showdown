@@ -304,9 +304,10 @@ export function renderPanel(model) {
       : `${model.meta.winner} wins`
     : null;
 
+  const confBadge = (c) => (c != null ? ` <span class="psa-rec-conf" title="How strongly this option is preferred over its alternative">${c}%</span>` : '');
   const recHtml = `<div class="psa-rec">
-  <div class="psa-rec-row"><span class="psa-rec-label">Best move</span><strong class="psa-rec-value">${escapeHtml(rec?.bestMove?.move ?? '—')}</strong></div>
-  <div class="psa-rec-row"><span class="psa-rec-label">Switch to</span><strong class="psa-rec-value">${escapeHtml(rec?.switchTo?.species ?? '—')}</strong></div>
+  <div class="psa-rec-row"><span class="psa-rec-label">Best move</span><span class="psa-rec-value">${escapeHtml(rec?.bestMove?.move ?? '—')}${confBadge(rec?.bestMove?.confidence)}</span></div>
+  <div class="psa-rec-row"><span class="psa-rec-label">Switch to</span><span class="psa-rec-value">${escapeHtml(rec?.switchTo?.species ?? '—')}${confBadge(rec?.switchTo?.confidence)}</span></div>
   ${rec?.note ? `<div class="psa-rec-note">${escapeHtml(rec.note)}</div>` : ''}
   ${winnerText ? `<div class="psa-rec-note psa-winner">${escapeHtml(winnerText)}</div>` : ''}
   ${(rec?.reasoning ?? []).length ? `<ul class="psa-reasoning">${rec.reasoning.map((r) => `<li>${escapeHtml(r)}</li>`).join('')}</ul>` : ''}

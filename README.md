@@ -297,6 +297,13 @@ captured from a real battle page and parses identically.
     since potential moves aren't certainties — so the engine suggests
     switching away from a lead that a possible move would wreck. Once all 4
     moves are revealed, hidden-move speculation stops.
+  - **Status-setup pivots**: a status wall (Chansey's Thunder Wave, Toxic,
+    …) gets the "status now, switch next turn" play — inflict the status,
+    then pivot to the damage dealer. A status move that would do nothing
+    (the target is already statused) is never recommended.
+  - Every recommendation carries a **confidence %**: the best move's share vs
+    the runner-up move, and the switch's share vs using the best move
+    (100% when it's the only option). Shown as badges in the panel.
 
 ### CLI
 
