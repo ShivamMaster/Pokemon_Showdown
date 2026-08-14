@@ -704,3 +704,52 @@ test('applyObservation returns null when nothing new is learned', () => {
   const changes = reader.applyObservation(dn, { species: 'Dragonite', moves: [] });
   assert.equal(changes, null);
 });
+
+test('reader: a Choice item locks the holder into its first move, reset on switch-in', () => {
+  const base = [
+    '|player|p1|Me|',
+    '|player|p2|Rival|',
+    '|poke|p1|Garchomp|',
+    '|poke|p2|Corviknight|',
+    '|turn|1',
+    '|switch|p1a: Garchomp|Garchomp, L100, F|100/100',
+    '|switch|p2a: Corviknight|Corviknight, L100, F|100/100',
+    '|item|p1a: Garchomp|Choice Band|',
+    '|move|p1a: Garchomp|Outrage|p2a: Corviknight',
+    '|move|p2a: Corviknight|Body Press|p1a: Garchomp',
+  ];
+  const s = parseLog(base.join('\n'));
+  const garchomp = s.sides.p1.pokemon.find((m) => m.species === 'Garchomp');
+  assert.equal(garchomp.lockedMove, 'Outrage', 'using a move while holding a Choice item locks it');
+
+  // A non-Choice item never locks.
+  const s2 = parseLog(base.join('\n').replace('Choice Band', 'Leftovers'));
+  assert.equal(
+    s2.sides.p1.pokemon.find((m) => m.species === 'Garchomp').lockedMove,
+    null,
+    'Leftovers must not lock the holder'
+  );
+
+  // The request id form ('choiceband') matches too.
+  const s3 = parseLog(base.join('\n').replace('|item|p1a: Garchomp|Choice Band|', ''));
+  const req = { side: { id: 'p1', pokemon: [{ ident: 'p1: Garchomp', details: 'Garchomp, L100, F', item: 'choiceband', moves: [], condition: '100/100' }] }, active: [] };
+  // Re-parse with a fresh reader so the request creates the record.
+  const reader = new BattleReader();
+  reader.applyLine('|player|p1|Me|');
+  reader.applyLine('|poke|p1|Garchomp|');
+  reader.applyRequest(req);
+  reader.applyLine('|move|p1: Garchomp|Outrage|p2a: X');
+  assert.equal(reader.state.sides.p1.pokemon.find((m) => m.species === 'Garchomp').lockedMove, 'Outrage');
+
+  // Switching back in gives a fresh lock (cleared until the next move).
+  const full = parseLog(
+    base.join('\n') +
+      '\n|turn|2\n|switch|p1b: Dragonite|Dragonite, L100, F|100/100\n|switch|p2b: Zapdos|Zapdos, L100, F|100/100' +
+      '\n|turn|3\n|switch|p1a: Garchomp|Garchomp, L100, F|100/100\n|switch|p2a: Corviknight|Corviknight, L100, F|100/100'
+  );
+  assert.equal(
+    full.sides.p1.pokemon.find((m) => m.species === 'Garchomp').lockedMove,
+    null,
+    're-entering the field clears the Choice lock'
+  );
+});

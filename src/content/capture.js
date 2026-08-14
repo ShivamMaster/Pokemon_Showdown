@@ -13,28 +13,75 @@
 const FRAME_W = 320;
 const FRAME_H = 180;
 const TICK_MS = 250;
+const BLOCK = 32;            // sample-block size in the 320x180 frame (10x5)
+// A real on-screen change (hover tooltip, HP bar move, log text) touches
+// several blocks; idle sprite bobbing/animations move only one or two. Only
+// count a change when at least this many blocks differ.
+const MIN_CHANGED_BLOCKS = 5;
 
-// A tiny rolling hash of sampled pixels — cheap way to tell the on-screen
-// content changed since the last frame.
-export function frameHash(ctx, w, h) {
-  const step = Math.max(1, Math.floor(w / 20));
+// One 32-bit hash per BLOCK×BLOCK block of the frame, from a few sampled
+// pixels inside it. Two frames' hashes are compared block-by-block, so a
+// small animated region (a bobbing sprite) shows up as a handful of differing
+// blocks instead of "the whole screen changed".
+export function blockHashes(ctx, w, h) {
+  // ceil so the partial blocks at the frame's bottom/right edges are sampled
+  // too (pixel indices are clamped below).
+  const bw = Math.max(1, Math.ceil(w / BLOCK));
+  const bh = Math.max(1, Math.ceil(h / BLOCK));
   const data = ctx.getImageData(0, 0, w, h).data;
-  let h1 = 0;
-  let h2 = 0;
-  for (let y = 0; y < h; y += step) {
-    for (let x = 0; x < w; x += step) {
-      const i = (y * w + x) * 4;
-      h1 = (h1 * 31 + data[i]) | 0;
-      h2 = (h2 * 31 + data[i + 2]) | 0;
+  const out = new Array(bw * bh);
+  for (let by = 0; by < bh; by++) {
+    for (let bx = 0; bx < bw; bx++) {
+      let h1 = 0;
+      let h2 = 0;
+      for (let sy = 0; sy < 2; sy++) {
+        for (let sx = 0; sx < 2; sx++) {
+          const px = Math.min(w - 1, bx * BLOCK + Math.floor((BLOCK * (sx + 0.5)) / 2));
+          const py = Math.min(h - 1, by * BLOCK + Math.floor((BLOCK * (sy + 0.5)) / 2));
+          const i = (py * w + px) * 4;
+          h1 = (h1 * 31 + data[i]) | 0;
+          h2 = (h2 * 31 + data[i + 2]) | 0;
+        }
+      }
+      out[by * bw + bx] = (h1 << 16) | (h2 & 0xffff);
     }
   }
-  return `${h1}:${h2}`;
+  return out;
+}
+
+// How many blocks differ between two frames, plus the bounding box (in block
+// units) of the changed area. Returns { count, bx0, by0, bx1, by1 }.
+export function changedBlocks(prev, cur, bw) {
+  if (!prev || !cur || prev.length !== cur.length) return { count: 0, bx0: 0, by0: 0, bx1: 0, by1: 0 };
+  let count = 0;
+  let bx0 = Infinity;
+  let by0 = Infinity;
+  let bx1 = -1;
+  let by1 = -1;
+  for (let i = 0; i < cur.length; i++) {
+    if (prev[i] !== cur[i]) {
+      count += 1;
+      const bx = i % bw;
+      const by = Math.floor(i / bw);
+      if (bx < bx0) bx0 = bx;
+      if (by < by0) by0 = by;
+      if (bx > bx1) bx1 = bx;
+      if (by > by1) by1 = by;
+    }
+  }
+  return {
+    count,
+    bx0: bx0 === Infinity ? 0 : bx0,
+    by0: by0 === Infinity ? 0 : by0,
+    bx1: Math.max(0, bx1),
+    by1: Math.max(0, by1),
+  };
 }
 
 export function createCapture({ video = document.createElement('video'), canvas = document.createElement('canvas') } = {}) {
   let stream = null;
   let timer = null;
-  let lastHash = '';
+  let prevBlocks = null;
   const stats = { active: false, frames: 0, changes: 0, width: FRAME_W, height: FRAME_H };
   let onUpdate = null;
 
@@ -46,12 +93,14 @@ export function createCapture({ video = document.createElement('video'), canvas 
     if (!stream || video.readyState < 2) return;
     try {
       ctx.drawImage(video, 0, 0, FRAME_W, FRAME_H);
-      const hash = frameHash(ctx, FRAME_W, FRAME_H);
+      const blocks = blockHashes(ctx, FRAME_W, FRAME_H);
       stats.frames += 1;
-      if (hash !== lastHash) {
-        lastHash = hash;
-        stats.changes += 1;
-      }
+      const first = prevBlocks === null;
+      const { count } = changedBlocks(prevBlocks, blocks, Math.ceil(FRAME_W / BLOCK));
+      prevBlocks = blocks;
+      // Only meaningful changes count: a tooltip/HP-bar/log change moves many
+      // blocks; idle sprite animation moves a few and is ignored.
+      if (first || count >= MIN_CHANGED_BLOCKS) stats.changes += 1;
       onUpdate?.();
     } catch {
       // a frame may be mid-update — try again next tick
@@ -81,7 +130,7 @@ export function createCapture({ video = document.createElement('video'), canvas 
     stats.active = true;
     stats.frames = 0;
     stats.changes = 0;
-    lastHash = '';
+    prevBlocks = null;
     timer = setInterval(tick, TICK_MS);
     return stats;
   }

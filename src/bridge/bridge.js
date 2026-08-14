@@ -58,6 +58,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
+// Main world -> background: the capture module started (or failed) — report
+// back so the popup's ack handshake can finish instead of timing out.
+window.addEventListener('message', (ev) => {
+  if (ev.source !== window || ev.data?.psa !== 'psa-capture-started') return;
+  chrome.runtime
+    .sendMessage({ psa: 'psa-capture-status', ok: !!ev.data.ok, error: ev.data.error ?? null })
+    .catch(() => {});
+});
+
 // Main world -> OCR: the main-world content script cannot use chrome.runtime
 // (it's a page-context script), so the isolated world forwards OCR requests
 // to the worker/offscreen document and posts the text back. ImageData pixels

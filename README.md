@@ -70,6 +70,17 @@ best move, built in stages:
   The pixels feed change detection (hover tooltips, HP movement) **and the
   OCR fallback** (Stage 8); the fast, exact tooltip reading stays DOM-based
   on top of it.
+  Change detection is **block-based**: the frame is hashed in 32px blocks
+  and a change only counts when several blocks differ at once, so idle
+  sprite bobbing/animations no longer register as "the screen changed" —
+  real events (tooltips, HP bars, log text) do.
+  Starting the watch is now a **handshake, not a fire-and-forget**: the
+  content script acks back through the bridge, the popup waits for the ack
+  (and retries with a fresh stream id if the page wasn't ready), and a
+  failure shows a real error message instead of silently doing nothing.
+- **Panel stays put** — re-renders (every poll tick and capture frame)
+  preserve your scroll position and the collapsed state, so the panel no
+  longer snaps back to the top or pops open on its own.
 - **Six-slot grid** — under *You* and *Opponent* each side renders six boxes
   (team-preview order for the opponent, request order for you). Empty slots
   are dashed placeholders (`not revealed yet`) that fill in as Pokémon are
@@ -317,6 +328,12 @@ captured from a real battle page and parses identically.
     …) gets the "status now, switch next turn" play — inflict the status,
     then pivot to the damage dealer. A status move that would do nothing
     (the target is already statused) is never recommended.
+  - **Choice-lock aware**: a mon holding a Choice Band/Specs/Scarf is stuck
+    on its first move after entering the field. The reader records the lock
+    (and resets it on switch-in), so the engine never suggests a move you
+    literally can't select — it says "locked into X — switch to reset" — and
+    it notes when the *opponent* is choice-locked, since they must repeat
+    that move.
   - Every recommendation carries a **confidence %**: the best move's share vs
     the runner-up move, and the switch's share vs using the best move
     (100% when it's the only option). Shown as badges in the panel.
@@ -340,12 +357,42 @@ captured from a real battle page and parses identically.
   range, with the range in the tooltip). Green tints the side that deals
   more; **red flags a likely OHKO on you** (≥100%). Their strongest
   likely-hidden move appears as *"could: ~80% Headlong Rush"* — the early-
-  battle warning before they reveal anything.
+  battle warning before they reveal anything. Every damage figure carries a
+  **mini HP-chunk bar**: the fill is the share of HP the hit takes out,
+  colored green (small) → amber (mid) → red (large), so you see the size of
+  the hit at a glance. The bench cards' takes/deals lines get the same bars.
+  **The team cards' HP bars are the same chunk bar**, scaled to current HP:
+  fill = remaining HP, colored green (healthy) → amber (mid) → red (sliver)
+  on the same 35/70 scale, with a "Current HP: N%" tooltip — one bar
+  language across the whole panel.
+  **A likely hidden move shows as a dashed segment** on the bar: their known
+  hit fills to 66%, and a dashed amber overlay extends to 80% — the range
+  the hit could actually land in (tooltip: "could reach ~80% with a hidden
+  move"). On the bench cards too (takes 35% → could be 75%), and in the
+  expanded full calc as its own row with a fully-dashed bar (dashed =
+  unconfirmed until revealed). When the hidden hit's **max roll crosses the
+  target's remaining HP**, a tiny red **"would KO"** badge sits over the
+  end of the dashed segment (e.g. Headlong Rush maxing at ~86% vs your 7%
+  HP) — on the Damage row, the bench takes bars, and the calc's hidden row.
+  **The dashed segment is clickable** — it reveals which hidden move it
+  represents, as a badge over the segment ("⚠ Headlong Rush ~80%"). The
+  reveal stays put across re-renders until you click again.
+  **The Damage-row bars are clickable** — they expand a **full damage calc**
+  right in the panel: every revealed damaging move on both sides with its
+  roll range, effectiveness, and KO chance (plus the likely hidden threat),
+  computed by the same calc as everything else. The view stays open across
+  re-renders until you click a bar again.
   The reasoning list quotes the **same figures** ("Their Great Tusk hits your
   Raging Bolt for ~66.2% (Earthquake)"): the panel's Damage row and the
   engine's text both come from one shared `matchupDamage` function, so they
   can never disagree. (Against a *predicted* switch-in — their active is
   down — the reasoning skips damage claims, since the target is a guess.)
+  **Every switch candidate in the You box** carries the same comparison on
+  its card: "vs Great Tusk: takes ~35% (Earthquake) · deals ~32% (Outrage) ·
+  could take ~75% (Ice Spinner)" — amber when the incoming hit is 50%+,
+  red at a potential OHKO, green when your return hit is 50%+, and immune
+  walls show "takes ~0%" instead of "unknown". The active mon and fainted
+  mons get no line (the active is covered by the matchup itself).
 
 ### CLI
 

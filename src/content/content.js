@@ -225,8 +225,12 @@ window.addEventListener('message', async (ev) => {
   if (ev.data?.psa === 'psa-capture-start') {
     try {
       await capture.start(ev.data.streamId);
+      // Ack back (via the bridge) so the popup knows the stream really
+      // started instead of assuming it did.
+      window.postMessage({ psa: 'psa-capture-started', ok: true }, '*');
       render(true);
     } catch (err) {
+      window.postMessage({ psa: 'psa-capture-started', ok: false, error: String(err?.message ?? err) }, '*');
       overlay.dataset.psaError = String(err?.stack ?? err);
     }
   } else if (ev.data?.psa === 'psa-capture-stop') {

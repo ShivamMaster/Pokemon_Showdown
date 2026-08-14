@@ -37,10 +37,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
     sendResponse({ ok: true });
   } else if (msg?.psa === 'psa-capture-start' && msg.tabId != null) {
-    chrome.tabs.sendMessage(msg.tabId, { psa: 'psa-capture-start', streamId: msg.streamId }).catch(() => {});
-    sendResponse({ ok: true });
+    // Report back whether the message actually reached the tab, so the popup
+    // can show a real error instead of silently doing nothing.
+    chrome.tabs
+      .sendMessage(msg.tabId, { psa: 'psa-capture-start', streamId: msg.streamId })
+      .then(() => sendResponse({ ok: true }))
+      .catch(() => sendResponse({ ok: false, error: 'No assistant running on this tab — open a Showdown battle first.' }));
+    return true; // async sendResponse
   } else if (msg?.psa === 'psa-capture-stop' && msg.tabId != null) {
     chrome.tabs.sendMessage(msg.tabId, { psa: 'psa-capture-stop' }).catch(() => {});
+    sendResponse({ ok: true });
+  } else if (msg?.psa === 'psa-capture-status') {
+    // The content script reported whether the stream started — relay it to
+    // the open popup so it can stop waiting for the ack.
+    chrome.runtime.sendMessage({ psa: 'psa-capture-status', ok: msg.ok, error: msg.error }).catch(() => {});
     sendResponse({ ok: true });
   } else if (msg?.psa === 'psa-ocr-req') {
     // Relay the OCR request to the offscreen document, then return its text.

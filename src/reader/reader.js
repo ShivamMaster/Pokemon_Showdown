@@ -32,6 +32,13 @@ const SPEED_ITEMS = new Set([
   'Macho Brace', 'Power Anklet', 'Power Band', 'Power Belt', 'Power Bracer', 'Power Lens', 'Power Weight',
 ]);
 
+// Choice items lock the holder into the first move it uses after switching in
+// (until it switches out). Compared by lowercased id so both the log's display
+// names and the request's ids ('choiceband') match.
+const CHOICE_ITEMS = new Set(['choiceband', 'choicespecs', 'choicescarf']);
+
+const toID = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+
 // Priority data the calc is missing (Grassy Glide is +1 priority, but only in
 // Grassy Terrain — the calc table doesn't record it).
 const PRIORITY_OVERRIDES = { 'Grassy Glide': 1 };
@@ -345,6 +352,8 @@ export class BattleReader {
     mon.active = true;
     mon.switchCount += 1;
     mon.justSwitchedIn = true;
+    // A fresh Choice lock forms on the first move it uses this time in.
+    mon.lockedMove = null;
     this._lastSwitchWasPivot[sideId] = false;
 
     this._recordAction('switch', sideId, ident, {
@@ -372,6 +381,11 @@ export class BattleReader {
     const mon = getPokemon(this.state, ident);
     if (!mon) return;
     addMove(mon, moveName);
+    // Choice items lock the holder into its first move after entering the
+    // field — record it so the engine never suggests a move it can't use.
+    if (CHOICE_ITEMS.has(toID(mon.item)) && mon.lockedMove == null) {
+      mon.lockedMove = moveName;
+    }
     const target = event.args[2] && !event.args[2].startsWith('[') ? event.args[2] : null;
     if (target) mon.lastTarget = target;
     const sideId = sideOf(ident);

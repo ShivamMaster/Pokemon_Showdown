@@ -328,12 +328,13 @@
 .psa-status-slp { background: #1565c0; color: #fff; }
 .psa-status-frz { background: #4dd0e1; color: #102027; }
 
-/* HP bar */
+/* HP bar — same chunk-bar look as the damage bars, scaled to current HP.
+   Fill width = remaining HP; color = how much is left (green healthy →
+   amber mid → red sliver), on the same 35/70 scale as the damage bars. */
 .psa-hpbar {
-  height: 7px;
-  border-radius: 4px;
-  background: #12141a;
-  border: 1px solid #2e3340;
+  height: 5px;
+  border-radius: 3px;
+  background: #2e3340;
   overflow: hidden;
   margin: 6px 0 3px;
 }
@@ -449,6 +450,193 @@
 
 .psa-match-row-spe .psa-match-win {
   color: var(--psa-ok);
+}
+
+/* Mini HP-chunk bar next to predicted-damage figures: fill width = the
+   percentage of the target's HP the hit takes out; color = how big that is. */
+.psa-mini-bar {
+  position: relative;
+  display: inline-block;
+  vertical-align: middle;
+  width: 36px;
+  height: 5px;
+  border-radius: 3px;
+  background: #2e3340;
+  overflow: hidden;
+  margin-left: 2px;
+}
+
+/* Dashed overlay segment: the known hit's fill plus how far a likely hidden
+   move could push the damage — shows the range the hit might land in. It's a
+   button: clicking it reveals which hidden move it represents. */
+.psa-mini-pot {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: repeating-linear-gradient(90deg, var(--psa-warn) 0 2px, transparent 2px 4px);
+  opacity: 0.85;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.psa-mini-pot:hover {
+  opacity: 1;
+  outline: 1px solid var(--psa-warn);
+  outline-offset: 0;
+}
+
+/* The move-name badge revealed by clicking the dashed segment. */
+.psa-pot-name {
+  display: none;
+  position: absolute;
+  top: -13px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--psa-warn);
+  background: rgba(16, 18, 24, 0.94);
+  border: 1px solid #5f5a2a;
+  border-radius: 3px;
+  padding: 2px 4px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.psa-mini-pot.psa-pot-revealed .psa-pot-name {
+  display: inline-block;
+}
+
+/* Tiny "would KO" badge over the dashed segment when the hidden move's max
+   roll crosses the target's remaining HP. */
+.psa-mini-bar-wrap {
+  position: relative;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+/* Reserve room above the bar only when a badge is actually shown. */
+.psa-mini-bar-wrap:has(.psa-mini-ko),
+.psa-mini-bar-wrap:has(.psa-mini-pot.psa-pot-revealed) {
+  margin-top: 11px;
+}
+
+.psa-mini-ko {
+  position: absolute;
+  top: -11px;
+  transform: translateX(-50%);
+  font-size: 7px;
+  font-weight: 700;
+  line-height: 1;
+  color: #ff8a80;
+  background: rgba(16, 18, 24, 0.92);
+  border: 1px solid #5c1f1f;
+  border-radius: 3px;
+  padding: 1px 3px;
+  white-space: nowrap;
+  pointer-events: none;
+  letter-spacing: 0.2px;
+}
+
+/* A bar in the Damage row is a button that expands the full damage calc. */
+.psa-bar-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  vertical-align: middle;
+  border-radius: 3px;
+}
+
+.psa-bar-btn:hover .psa-mini-bar,
+.psa-bar-btn:focus-visible .psa-mini-bar {
+  outline: 1px solid var(--psa-accent);
+  outline-offset: 1px;
+}
+
+/* Expanded full damage calc (hidden until a Damage bar is clicked). */
+.psa-calc-panel {
+  display: none;
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: #161a21;
+  border: 1px solid #2e3340;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.psa-matchup.psa-calc-open .psa-calc-panel {
+  display: block;
+}
+
+.psa-calc-head {
+  color: var(--psa-muted);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-bottom: 5px;
+}
+
+.psa-calc-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.psa-calc-title {
+  color: var(--psa-muted);
+  margin-bottom: 2px;
+}
+
+.psa-calc-move {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 0;
+}
+
+.psa-calc-move-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 76px;
+}
+
+.psa-calc-roll {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The likely hidden move's row: dashed bar = unconfirmed until revealed. */
+.psa-calc-move-hidden .psa-calc-move-name {
+  color: var(--psa-warn);
+}
+
+.psa-calc-move-hidden .psa-calc-roll {
+  color: var(--psa-muted);
+}
+
+.psa-mini-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+}
+
+.psa-mini-fill-ok {
+  background: var(--psa-ok);
+}
+
+.psa-mini-fill-warn {
+  background: var(--psa-warn);
+}
+
+.psa-mini-fill-danger {
+  background: var(--psa-danger);
 }
 
 /* Per-card predicted-damage comparison (You box switch candidates). */

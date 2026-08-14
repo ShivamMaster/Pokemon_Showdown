@@ -344,6 +344,25 @@ test('render: damage row with win/dim tinting and the hidden-move warning', () =
   assert.ok(row.includes('psa-match-win'), 'their higher damage is tinted green');
   // Roll range in the tooltip.
   assert.ok(row.includes('38.2-45.2% roll'), 'our roll range is in the tooltip');
+  // Mini chunk bars next to each damage figure.
+  assert.ok(row.includes('psa-mini-bar'), 'a chunk bar renders next to each damage cell');
+  assert.ok(row.includes('width:66%') && row.includes('width:42%'), 'bar width matches the chunk size');
+  assert.ok(row.includes('psa-mini-fill-warn'), 'a 40-70% chunk is amber');
+  // Their hidden threat (Headlong Rush ~80%) shows as a dashed segment on
+  // their bar: from the known 66% out to 80%.
+  assert.ok(row.includes('psa-mini-pot'), 'the hidden threat is a dashed overlay on the bar');
+  assert.ok(row.includes('left:66%;width:14%'), 'the dashed segment spans the known hit to the hidden hit');
+  // The dashed segment is clickable and carries the hidden move's name in a
+  // hidden badge, revealed on click (content script toggles psa-pot-revealed).
+  assert.ok(row.includes('class="psa-mini-pot"') && row.includes('data-pot-key="matchup-hidden"'), 'the dashed segment is a clickable button with a stable key');
+  assert.ok(row.includes('psa-pot-name">⚠ Headlong Rush ~80%'), 'the badge holds the move name, hidden until revealed');
+  assert.ok(!row.includes('psa-pot-revealed'), 'the badge starts hidden (no reveal class)');
+  assert.ok(row.includes('could reach ~80%'), 'the bar tooltip names the hidden ceiling');
+  // We're at 7% HP and Headlong Rush maxes at ~86% — the dashed segment
+  // crosses the KO line, so a tiny label sits over it.
+  assert.ok(row.includes('psa-mini-ko') && row.includes('would KO'), 'hidden threat crossing our HP gets a would-KO label');
+  assert.ok(row.includes('left:80%'), 'the label sits at the end of the dashed segment');
+  assert.ok(row.includes('max roll (~86%) exceeds the 7% HP remaining'), 'the label explains the KO math');
 });
 
 test('render: a potential OHKO on us shows red in the damage row', () => {
@@ -413,9 +432,81 @@ test('render: damage comparison line on switch candidates, with threat coloring'
   assert.ok(html.includes('could take ~75% (Ice Spinner)'), 'hidden threat shown as could-have');
   assert.ok(html.includes('takes ~0% (Earthquake)'), 'an immune wall shows ~0%, not unknown');
   assert.ok(html.includes('psa-card-vs-warn'), "Chansey's 55% incoming is amber-warned");
+  // Chunk bars on the takes/deals figures too.
+  assert.ok(html.includes('width:35%') && html.includes('width:32%'), 'bench chunk bars match the hits');
+  assert.ok(html.includes('psa-mini-fill-warn') && html.includes('psa-mini-fill-ok'), 'bar color scales with chunk size');
+  // Garchomp's hidden Ice Spinner (~75%) is a dashed segment on its takes bar
+  // (35% -> 75%); the immune Corviknight has no hidden threat, so no segment.
+  assert.ok(html.includes('left:35%;width:40%'), 'bench takes bar shows the hidden threat as a dashed segment');
+  const corv = html.slice(html.indexOf('vs Great Tusk: takes ~0%'));
+  assert.ok(!corv.includes('psa-mini-pot'), 'no dashed segment when there is no hidden threat');
+  // Garchomp is at full HP, so the 75% hidden hit can't KO — no label.
+  const g100 = html.slice(html.indexOf('psa-card-vs'), html.indexOf('deals ~32%'));
+  assert.ok(!g100.includes('psa-mini-ko'), 'healthy candidate: no would-KO label');
+  // Drop Garchomp to 30% HP and the hidden Ice Spinner (max ~81%) crosses
+  // the KO line — the label appears on its takes bar.
+  partial.sides.p1.pokemon.find((m) => m.species === 'Garchomp').hpPercent = 30;
+  const html30 = renderPanel(buildPanelModel(partial));
+  const g30 = html30.slice(html30.indexOf('psa-card-vs'), html30.indexOf('deals ~32%'));
+  assert.ok(g30.includes('psa-mini-ko') && g30.includes('would KO'), 'low-HP candidate: hidden threat gets the would-KO label');
   // The active card must NOT carry the comparison (it's covered by the matchup).
   const activeCard = html.slice(html.indexOf('Raging Bolt'), html.indexOf('psa-card', html.indexOf('Raging Bolt') + 1));
   assert.ok(!activeCard.includes('psa-card-vs'), 'no comparison on the active card');
+});
+
+test('model: matchup carries a full per-move calc breakdown', () => {
+  const lines = realLog.split('\n');
+  const partial = parseLog(lines.slice(0, lines.indexOf('|turn|2')).join('\n'));
+  const calc = buildPanelModel(partial).matchup.calc;
+  assert.ok(calc, 'calc breakdown present when both actives exist');
+  assert.deepEqual(
+    calc.ours.map((m) => m.move),
+    ['Dragon Pulse'],
+    'our revealed damaging moves, best first'
+  );
+  assert.equal(calc.ours[0].mean, 41.6);
+  assert.equal(calc.ours[0].ko, true, 'a hit that can exceed their remaining HP is a KO threat');
+  assert.equal(calc.ours[0].koGuaranteed, true);
+  assert.deepEqual(calc.theirs.map((m) => m.move), ['Earthquake']);
+  assert.equal(calc.theirs[0].effectiveness, 2, 'effectiveness carried into the breakdown');
+});
+
+test('render: Damage bars are clickable and expand the full damage calc', () => {
+  const lines = realLog.split('\n');
+  const partial = parseLog(lines.slice(0, lines.indexOf('|turn|2')).join('\n'));
+  const html = renderPanel(buildPanelModel(partial));
+  assert.equal((html.match(/psa-bar-btn/g) || []).length, 2, 'both Damage-row bars are clickable buttons');
+  assert.ok(html.includes('psa-calc-panel'), 'the full calc panel is rendered');
+  assert.ok(!html.includes('psa-calc-open'), 'it starts collapsed — the content script opens it on click');
+  assert.ok(html.includes('Full damage calc — Raging Bolt vs Great Tusk'), 'the panel names the matchup');
+  assert.ok(html.includes('Your moves on Great Tusk'), 'our column titled');
+  assert.ok(html.includes('Their moves on Raging Bolt'), 'their column titled');
+  assert.ok(html.includes('~42% (38.2-45.2)') && html.includes('guaranteed KO'), 'roll range and KO label shown');
+  assert.ok(
+    html.includes('psa-calc-move-hidden') && html.includes('⚠ Headlong Rush') && html.includes('~80% hidden'),
+    'the likely hidden threat is its own row'
+  );
+  assert.ok(html.includes('left:0%;width:80%'), 'the hidden threat row uses a fully-dashed bar');
+  assert.ok(html.includes('psa-mini-ko'), 'the hidden row flags the KO crossing too');
+  // Status moves never appear in the breakdown (the team cards still list
+  // them, so assert on the calc's move-row form, not a bare name).
+  partial.sides.p1.pokemon.find((m) => m.species === 'Raging Bolt').moves = ['Dragon Pulse', 'Thunder Wave'];
+  const html2 = renderPanel(buildPanelModel(partial));
+  assert.ok(!html2.includes('psa-calc-move-name">Thunder Wave'), 'status moves are skipped in the calc');
+});
+
+test('render: team-card HP bars use the chunk-bar style, scaled to current HP', () => {
+  const lines = realLog.split('\n');
+  const partial = parseLog(lines.slice(0, lines.indexOf('|turn|2')).join('\n'));
+  const us = partial.sides.p1.pokemon.find((m) => m.species === 'Raging Bolt');
+  // Same 35/70 scale as the damage bars: healthy green, mid amber, sliver red.
+  for (const [hp, cls] of [[90, 'psa-hp-high'], [55, 'psa-hp-mid'], [20, 'psa-hp-low']]) {
+    us.hpPercent = hp;
+    const html = renderPanel(buildPanelModel(partial));
+    assert.ok(html.includes(cls), `${hp}% HP renders ${cls}`);
+    assert.ok(html.includes(`style="width:${hp}%"`), `bar is scaled to ${hp}% HP`);
+    assert.ok(html.includes(`Current HP: ${hp}%`), 'the bar tooltip shows the exact HP');
+  }
 });
 
 test('model: matchup is null when a side has no active (battle over)', () => {

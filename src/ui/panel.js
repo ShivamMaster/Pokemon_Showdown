@@ -9,7 +9,7 @@
 // plug into the recommendation slot later via opts.recommendation.
 
 import { Pokemon, Move } from '@smogon/calc';
-import { buildField, buildPokemon, effectivenessOf } from '../engine/calc.js';
+import { buildField, buildPokemon, damagePercent, effectivenessOf } from '../engine/calc.js';
 import { topPotentialMoves } from '../engine/movepool.js';
 import { matchupDamage } from '../engine/recommend.js';
 import { speedLine } from '../engine/speed.js';
@@ -312,6 +312,7 @@ export function buildPanelModel(state, opts = {}) {
       speed: speedLine(ourActiveMon, theirActiveMon, gen, state, ourSideId),
       typeEdge: typeEdgeOf(gen, ourActiveMon, theirActiveMon),
       damage: matchupDamage(gen, ourActiveMon, theirActiveMon, field),
+      calc: matchupCalc(gen, ourActiveMon, theirActiveMon, field),
     };
   }
 
@@ -378,8 +379,68 @@ function hpBar(hpPercent) {
     return '<div class="psa-hpbar"><div class="psa-hpfill psa-hp-unknown" style="width:100%"></div></div>';
   }
   const pct = Math.max(0, Math.min(100, hpPercent));
-  const cls = pct <= 20 ? 'psa-hp-low' : pct <= 50 ? 'psa-hp-mid' : 'psa-hp-high';
-  return `<div class="psa-hpbar"><div class="psa-hpfill ${cls}" style="width:${pct}%"></div></div>`;
+  // Same chunk-bar scale as the damage bars (35/70 thresholds): green when
+  // healthy, amber mid, red when the remaining HP is a sliver.
+  const cls = pct <= 35 ? 'psa-hp-low' : pct <= 70 ? 'psa-hp-mid' : 'psa-hp-high';
+  return `<div class="psa-hpbar" title="Current HP: ${Math.round(pct)}%"><div class="psa-hpfill ${cls}" style="width:${pct}%"></div></div>`;
+}
+
+// Mini HP-chunk bar for a predicted-damage figure: the fill width is the
+// percentage of the target's HP the hit takes out (capped at 100), colored by
+// how big that chunk is. `potential` (>pct) renders a dashed overlay segment
+// from the known hit up to a likely hidden-move threat, so the bar shows the
+// range the hit could actually land in. The dashed segment is itself a button
+// (`potentialName`/`potKey`) that reveals which hidden move it represents when
+// clicked. When the potential's max roll crosses the target's remaining HP
+// (`koAt`), a tiny "would KO" label sits over the segment. With `clickable`,
+// the main bar becomes a button that expands the full damage calc.
+function miniBar(pct, clickable = false, potential = null, potentialMax = null, koAt = null, potentialName = null, potKey = null) {
+  const p = Math.max(0, Math.min(100, Math.round(pct)));
+  const cls = p >= 70 ? 'psa-mini-fill-danger' : p >= 35 ? 'psa-mini-fill-warn' : 'psa-mini-fill-ok';
+  const pot = potential != null ? Math.max(0, Math.min(100, Math.round(potential))) : null;
+  const pmax = potentialMax != null ? Math.round(potentialMax) : null;
+  const ko = pot != null && pmax != null && koAt != null && pmax >= koAt;
+  const hasPot = pot != null && pot > p;
+  const title = `Takes out ~${p}% of their HP${hasPot ? ` (could reach ~${pot}% with a hidden move)` : ''}`;
+  const bar = `<span class="psa-mini-bar" title="${title}"><span class="psa-mini-fill ${cls}" style="width:${p}%"></span></span>`;
+  const inner = clickable
+    ? `<button type="button" class="psa-bar-btn" title="Click for the full damage calc for this matchup">${bar}</button>`
+    : bar;
+  if (!hasPot) return inner;
+  const keyAttr = potKey ? ` data-pot-key="${escapeHtml(potKey)}"` : '';
+  const nameTxt = potentialName ? `⚠ ${escapeHtml(potentialName)} ~${pot}%` : 'hidden';
+  const potBtn = `<button type="button" class="psa-mini-pot"${keyAttr} style="left:${p}%;width:${pot - p}%" title="${potentialName ? `Hidden threat: ${escapeHtml(potentialName)} (mean ~${pot}%) — click to reveal it` : 'A likely hidden move — click to reveal it'}"><span class="psa-pot-name">${nameTxt}</span></button>`;
+  const koLabel = ko
+    ? `<span class="psa-mini-ko" style="left:${pot}%" title="Its max roll (~${pmax}%) exceeds the ${Math.round(koAt)}% HP remaining — a hit here would KO">would KO</span>`
+    : '';
+  return `<span class="psa-mini-bar-wrap">${inner}${potBtn}${koLabel}</span>`;
+}
+
+// Full per-move damage breakdown for the active matchup: every revealed
+// damaging move of each side against the other's active, with the roll range
+// and KO chances vs its current HP. Same damagePercent path as the Damage
+// row, so every number in the breakdown agrees with the row.
+function matchupCalc(gen, ourMon, theirMon, field) {
+  const side = (atkMon, defMon) => {
+    const hp = defMon?.hpPercent ?? 100;
+    const out = [];
+    for (const moveName of atkMon?.moves ?? []) {
+      const d = damagePercent(gen, atkMon, defMon, moveName, field);
+      if (!d || d.category === 'Status') continue;
+      out.push({
+        move: moveName,
+        mean: d.mean,
+        min: d.min,
+        max: d.max,
+        effectiveness: d.effectiveness,
+        ko: d.max >= hp,
+        koGuaranteed: d.min >= hp,
+      });
+    }
+    out.sort((a, b) => b.mean - a.mean);
+    return out;
+  };
+  return { ours: side(ourMon, theirMon), theirs: side(theirMon, ourMon) };
 }
 
 function renderCard(card) {
@@ -426,13 +487,13 @@ function renderCard(card) {
         if (t?.move) {
           const p = Math.round(t.pct);
           const cls = p >= 100 ? 'psa-card-vs-danger' : p >= 50 ? 'psa-card-vs-warn' : '';
-          parts.push(`<span class="${cls}">takes ~${p}% (${escapeHtml(t.move)})</span>`);
+          parts.push(`<span class="${cls}">takes ~${p}% (${escapeHtml(t.move)}) ${miniBar(t.pct, false, card.vsActive.hidden?.pct, card.vsActive.hidden?.max, card.hpPercent, card.vsActive.hidden?.move, card.ident)}</span>`);
         } else {
           parts.push('<span class="psa-muted">no revealed damage in</span>');
         }
         if (card.vsActive.deals) {
           const p = Math.round(card.vsActive.deals.pct);
-          parts.push(`<span class="${p >= 50 ? 'psa-card-vs-good' : ''}">deals ~${p}% (${escapeHtml(card.vsActive.deals.move)})</span>`);
+          parts.push(`<span class="${p >= 50 ? 'psa-card-vs-good' : ''}">deals ~${p}% (${escapeHtml(card.vsActive.deals.move)}) ${miniBar(card.vsActive.deals.pct)}</span>`);
         }
         if (card.vsActive.hidden) {
           parts.push(`<span class="psa-muted">could take ~${Math.round(card.vsActive.hidden.pct)}% (${escapeHtml(card.vsActive.hidden.move)})</span>`);
@@ -539,13 +600,17 @@ function renderMatchup(matchup) {
       return ahead ? 'psa-match-win' : 'psa-match-lose';
     };
     const dmgText = (d) => (d ? `~${Math.round(d.pct)}% ${d.move}` : 'no moves');
-    dmgUs = dmgText(oursDmg);
-    dmgThem = dmgText(theirsDmg);
+    // The bars in this row are clickable — they expand the full calc below.
+    dmgUs = dmgText(oursDmg) + (oursDmg ? ` ${miniBar(oursDmg.pct, true)}` : '');
+    dmgThem = dmgText(theirsDmg) + (theirsDmg ? ` ${miniBar(theirsDmg.pct, true, theirHidden?.pct, theirHidden?.max, matchup.ours.hpPercent, theirHidden?.move, 'matchup-hidden')}` : '');
     if (theirHidden) dmgThem += ` <span class="psa-muted">(could: ~${Math.round(theirHidden.pct)}% ${theirHidden.move})</span>`;
     dmgUsCls = cellCls(true, oursDmg?.pct ?? null);
     dmgThemCls = cellCls(false, theirsDmg?.pct ?? null);
   }
-  const dmgRow = `<tr class="psa-match-row-dmg"><td title="Predicted damage of each side's best revealed move against the other's active (mean roll, same calc as the recommendations); 'could:' = a likely hidden move that hits harder">Damage</td><td class="psa-match-us-col ${dmgUsCls}" title="${oursDmg ? `${oursDmg.min}-${oursDmg.max}% roll` : ''}">${dmgUs}</td><td class="psa-match-them-col ${dmgThemCls}" title="${theirsDmg ? `${theirsDmg.min}-${theirsDmg.max}% roll` : ''}">${dmgThem}</td></tr>`;
+  const dmgRow = `<tr class="psa-match-row-dmg"><td title="Predicted damage of each side's best revealed move against the other's active (mean roll, same calc as the recommendations); click a bar for the full calc; 'could:' = a likely hidden move that hits harder">Damage</td><td class="psa-match-us-col ${dmgUsCls}" title="${oursDmg ? `${oursDmg.min}-${oursDmg.max}% roll` : ''}">${dmgUs}</td><td class="psa-match-them-col ${dmgThemCls}" title="${theirsDmg ? `${theirsDmg.min}-${theirsDmg.max}% roll` : ''}">${dmgThem}</td></tr>`;
+
+  // Full damage calc for the matchup, hidden until a Damage bar is clicked.
+  const calcPanel = renderCalcPanel(matchup);
 
   return `<div class="psa-matchup">
   <div class="psa-match-head">
@@ -566,6 +631,45 @@ function renderMatchup(matchup) {
     ${row('Ability', matchup.ours.ability ?? '?', matchup.theirs.ability ?? '?')}
     ${typeRow}
   </table>
+  ${calcPanel}
+</div>`;
+}
+
+// The expanded full damage calc: every revealed damaging move of each side
+// against the other's active, with rolls and KO chances (plus the likely
+// hidden threat). Rendered hidden; the content script toggles it via
+// `.psa-calc-open` on the matchup when a Damage bar is clicked.
+function renderCalcPanel(matchup) {
+  const calc = matchup.calc;
+  if (!calc) return '';
+  const effTxt = (e) => (e === 1 ? '' : e === 0 ? 'immune' : `${e}×`);
+  const moveRow = (m) => {
+    const koTxt = m.ko ? (m.koGuaranteed ? ' · guaranteed KO' : ' · can KO') : '';
+    const eff = effTxt(m.effectiveness);
+    return `<div class="psa-calc-move"><span class="psa-calc-move-name" title="${escapeHtml(m.move)}">${escapeHtml(m.move)}</span>${miniBar(m.mean)}<span class="psa-calc-roll">~${Math.round(m.mean)}% (${m.min}-${m.max})${eff ? ` · ${eff}` : ''}${koTxt}</span></div>`;
+  };
+  // The likely hidden move gets its own row with a fully-dashed bar — dashed
+  // means "not confirmed": it could be this strong, but it hasn't been shown.
+  const hiddenRow = (hidden) => {
+    const p = Math.max(0, Math.min(100, Math.round(hidden.pct)));
+    // Fully-dashed bar (pct 0 -> hidden), with the KO label when it crosses
+    // our remaining HP. Same miniBar as everywhere else, so the label logic
+    // stays in one place.
+    const bar = miniBar(0, false, hidden.pct, hidden.max, matchup.ours.hpPercent, hidden.move, 'matchup-hidden');
+    return `<div class="psa-calc-move psa-calc-move-hidden" title="Not revealed yet — a likely move from its learnset, shown as a dashed bar until confirmed"><span class="psa-calc-move-name">⚠ ${escapeHtml(hidden.move)}</span>${bar}<span class="psa-calc-roll">~${p}% hidden</span></div>`;
+  };
+  const col = (title, moves, hidden) => `
+    <div class="psa-calc-col">
+      <div class="psa-calc-title">${escapeHtml(title)}</div>
+      ${moves.length ? moves.map(moveRow).join('') : '<div class="psa-muted">no damaging moves revealed</div>'}
+      ${hidden ? hiddenRow(hidden) : ''}
+    </div>`;
+  return `<div class="psa-calc-panel" aria-label="Full damage calc">
+  <div class="psa-calc-head">Full damage calc — ${escapeHtml(matchup.ours.species)} vs ${escapeHtml(matchup.theirs.species)}</div>
+  <div class="psa-calc-cols">
+    ${col(`Your moves on ${matchup.theirs.species}`, calc.ours, null)}
+    ${col(`Their moves on ${matchup.ours.species}`, calc.theirs, matchup.damage?.theirHidden ?? null)}
+  </div>
 </div>`;
 }
 

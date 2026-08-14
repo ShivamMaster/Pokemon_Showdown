@@ -77,6 +77,7 @@ export function createPokemon({ ident, side, species, gender, level }) {
     moves: [],                // revealed move names, unique, in reveal order
     lastMove: null,
     lastTarget: null,
+    lockedMove: null,         // move it's locked into by a Choice item (reset on switch-in)
     volatiles: new Set(),     // active volatile effects (lowercased), e.g. 'encore'
     active: false,
     fainted: false,

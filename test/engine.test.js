@@ -670,3 +670,31 @@ test('recommend uses observed move order to resolve a close speed matchup', () =
   assert.ok(line, `expected an observed speed line, got: ${JSON.stringify(rec.reasoning)}`);
   assert.match(line, /observed: it moved first when you last traded moves/);
 });
+
+test('recommend: a Choice-locked mon is only advised to use its locked move', () => {
+  const state = makeState({
+    ourActive: { species: 'Garchomp', moves: ['Outrage', 'Earthquake', 'Swords Dance'], item: 'Choice Band' },
+    theirActive: { species: 'Corviknight', moves: ['Body Press'] },
+  });
+  // The reader sets this after the first move use; simulate it here.
+  state.sides.p1.pokemon.find((m) => m.species === 'Garchomp').lockedMove = 'Outrage';
+  const rec = recommend(state);
+  assert.equal(rec.bestMove.move, 'Outrage', 'only the locked move may be recommended');
+  assert.ok(
+    rec.reasoning.some((r) => r.includes('locked into Outrage') && r.includes("can't be used")),
+    'the lock is explained and the unusable moves flagged'
+  );
+});
+
+test('recommend: notes when the opponent is Choice-locked (expect the repeat)', () => {
+  const state = makeState({
+    ourActive: { species: 'Garchomp', moves: ['Outrage'] },
+    theirActive: { species: 'Corviknight', moves: ['Body Press'], item: 'Choice Band' },
+  });
+  state.sides.p2.pokemon.find((m) => m.species === 'Corviknight').lockedMove = 'Body Press';
+  const rec = recommend(state);
+  assert.ok(
+    rec.reasoning.some((r) => r.includes('locked into Body Press')),
+    `expected a their-lock note, got: ${JSON.stringify(rec.reasoning)}`
+  );
+});

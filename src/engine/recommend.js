@@ -484,9 +484,19 @@ export function recommend(state, opts = {}) {
   // flip-flop. (Fainted mons are never candidates anyway.)
   const recentlyLeft = (m) => m.switchedOutTurn != null && state.turn - m.switchedOutTurn <= 1;
 
+  // Choice lock: a mon holding a Choice item is stuck on its first move after
+  // entering the field until it switches out — the other moves literally can't
+  // be selected, so never recommend them.
+  const ourLock = ourActive.lockedMove ?? null;
+  if (ourLock) {
+    reasoning.push(`Your ${ourActive.species} is locked into ${ourLock} by its ${ourActive.item ?? 'Choice item'} — the other moves can't be used until it switches out.`);
+  }
+
   const moveEvals = [];
   const speed = speedOrder(ourActive, theirTarget, gen, state, ourSideId);
   for (const moveName of ourActive.moves) {
+    if (ourLock && moveName !== ourLock) continue; // physically unselectable
+
     // A move that's already out of PP can't be used — don't keep recommending it.
     const pp = ourActive.movePp?.[moveName];
     if (pp && pp.cur <= 0) {
@@ -544,6 +554,11 @@ export function recommend(state, opts = {}) {
 
   if (bestMove) {
     reasoning.push(bestMove.note);
+    // A choice-locked opponent can only repeat its locked move (or switch) —
+    // useful intel: expect that move again, don't hedge across their bench.
+    if (theirTarget?.lockedMove) {
+      reasoning.push(`Their ${theirTarget.species} is locked into ${theirTarget.lockedMove} by its ${theirTarget.item ?? 'Choice item'} — expect it to repeat that move.`);
+    }
     if (bestMove.ko) {
       reasoning.push(bestMove.koGuaranteed
         ? `The move guarantees a KO on ${theirTarget.species}.`

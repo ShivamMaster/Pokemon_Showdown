@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { frameHash, createCapture } from '../src/content/capture.js';
+import { blockHashes, changedBlocks, createCapture } from '../src/content/capture.js';
 
 // A minimal fake 2D context that returns deterministic pixel data.
 function fakeContext(width, height, fill) {
@@ -19,13 +19,45 @@ function fakeContext(width, height, fill) {
   };
 }
 
-test('frameHash: stable for identical pixels, different for changed pixels', () => {
+// Like fakeContext but with a rectangular region painted a different color.
+function contextWithRegion(width, height, fill, region) {
+  const ctx = fakeContext(width, height, fill);
+  const img = ctx.getImageData(0, 0, width, height);
+  const { x, y, w, h } = region;
+  for (let py = y; py < y + h; py++) {
+    for (let px = x; px < x + w; px++) {
+      const i = (py * width + px) * 4;
+      img.data[i] = 255 - fill.r;
+      img.data[i + 1] = 255 - fill.g;
+      img.data[i + 2] = 255 - fill.b;
+    }
+  }
+  return ctx;
+}
+
+test('blockHashes: stable for identical pixels, different per changed block', () => {
   const ctx1 = fakeContext(320, 180, { r: 10, g: 20, b: 30 });
   const ctx2 = fakeContext(320, 180, { r: 10, g: 20, b: 30 });
   const ctx3 = fakeContext(320, 180, { r: 11, g: 20, b: 30 });
 
-  assert.equal(frameHash(ctx1, 320, 180), frameHash(ctx2, 320, 180));
-  assert.notEqual(frameHash(ctx1, 320, 180), frameHash(ctx3, 320, 180));
+  assert.deepEqual(blockHashes(ctx1, 320, 180), blockHashes(ctx2, 320, 180));
+  assert.notDeepEqual(blockHashes(ctx1, 320, 180), blockHashes(ctx3, 320, 180));
+});
+
+test('changedBlocks: idle animation (a few blocks) is ignored, real changes count', () => {
+  const bw = Math.floor(320 / 32); // 10 blocks wide
+  // A bobbing sprite: a ~30x30 region (about one block) shifts by a few px.
+  const idleA = contextWithRegion(320, 180, { r: 10, g: 20, b: 30 }, { x: 60, y: 40, w: 30, h: 30 });
+  const idleB = contextWithRegion(320, 180, { r: 10, g: 20, b: 30 }, { x: 70, y: 45, w: 30, h: 30 });
+  const idle = changedBlocks(blockHashes(idleA, 320, 180), blockHashes(idleB, 320, 180), bw);
+  assert.ok(idle.count < 5, `idle bobbing must stay under the threshold, got ${idle.count}`);
+
+  // A tooltip: a ~100x70 region (4x3 blocks) appears.
+  const quiet = fakeContext(320, 180, { r: 10, g: 20, b: 30 });
+  const tooltip = contextWithRegion(320, 180, { r: 10, g: 20, b: 30 }, { x: 40, y: 30, w: 100, h: 70 });
+  const tip = changedBlocks(blockHashes(quiet, 320, 180), blockHashes(tooltip, 320, 180), bw);
+  assert.ok(tip.count >= 5, `a tooltip must count as a change, got ${tip.count}`);
+  assert.ok(tip.bx0 <= 2 && tip.bx1 >= 4, 'the change bbox spans the tooltip region');
 });
 
 test('createCapture: start/stop lifecycle and stats', async () => {
