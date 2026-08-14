@@ -180,6 +180,24 @@ test('render: recommendation confidence badges are shown', () => {
   assert.ok(!plain.includes('psa-rec-conf'));
 });
 
+test('render: risk-mode badge shows the line we are playing and the margin', () => {
+  const mk = (risk) =>
+    renderPanel(buildPanelModel(state, { recommendation: { bestMove: { move: 'Earthquake' }, switchTo: null, reasoning: [], note: null, risk } }));
+  // Safe: green badge, label, and the +margin.
+  const safe = mk({ mode: 'safe', label: 'playing safe', advantage: 230 });
+  assert.ok(safe.includes('psa-rec-risk'), 'risk badge markup present');
+  assert.ok(safe.includes('psa-risk-safe'), 'safe mode carries its class');
+  assert.ok(safe.includes('playing safe'), 'the line is labeled');
+  assert.ok(safe.includes('(+230)'), 'the ahead margin is shown');
+  // Aggressive: red badge with the deficit.
+  const agg = mk({ mode: 'aggressive', label: 'playing aggressive', advantage: -210 });
+  assert.ok(agg.includes('psa-risk-aggressive'));
+  assert.ok(agg.includes('(-210)'));
+  // Balanced (or absent) -> no badge at all.
+  assert.ok(!mk({ mode: 'normal', label: 'balanced play', advantage: 0 }).includes('psa-rec-risk'));
+  assert.ok(!mk(null).includes('psa-rec-risk'));
+});
+
 // ---------------------------------------------------------------------------
 // HTML rendering
 // ---------------------------------------------------------------------------

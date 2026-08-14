@@ -78,7 +78,16 @@ export function renderOptionsHtml(profiles, settings) {
         <option value="base" ${s.statAssumption === 'base' ? 'selected' : ''}>Base stats (no EVs)</option>
       </select>
     </label>
-    <p class="psa-hint">Stat assumptions only matter for damage estimates — hidden EVs/natures are never known for sure.</p>
+    <label class="psa-setting">
+      <span>Risk mode</span>
+      <select id="psa-risk-mode">
+        <option value="auto" ${s.riskMode === 'auto' ? 'selected' : ''}>Auto — adapt to who's ahead</option>
+        <option value="safe" ${s.riskMode === 'safe' ? 'selected' : ''}>Safe — protect the lead</option>
+        <option value="normal" ${s.riskMode === 'normal' ? 'selected' : ''}>Balanced</option>
+        <option value="aggressive" ${s.riskMode === 'aggressive' ? 'selected' : ''}>Aggressive — gamble for the win</option>
+      </select>
+    </label>
+    <p class="psa-hint">Auto reads the board each turn: ahead → play safe and take the sure line; behind → play aggressive and take the gamble that wins if it lands.</p>
   </section>
 
   <section class="psa-section">
@@ -123,6 +132,13 @@ export async function main() {
     stat?.addEventListener('change', async () => {
       settings = normalizeSettings(settings);
       settings.statAssumption = stat.value;
+      await saveSettings(settings);
+    });
+
+    const risk = root.querySelector('#psa-risk-mode');
+    risk?.addEventListener('change', async () => {
+      settings = normalizeSettings(settings);
+      settings.riskMode = risk.value;
       await saveSettings(settings);
     });
 

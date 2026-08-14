@@ -29,6 +29,26 @@ best move, built in stages:
     prediction is threat-based (the move you click draws the mon that walls
     it), setup moves are scored by the sweep they unlock, and the endgame is
     enumerated into locked 1v1s. All fed into the reasoning the panel shows.
+11. **Risk modes** (done) — the engine reads who's ahead (a board-advantage
+    score from remaining HP + bodies) and adapts how it plays: ahead →
+    **safe** (reward the guaranteed KO, discount risky rolls, switch eagerly
+    to protect the lead); behind → **aggressive** (prize the non-guaranteed
+    KO swing, accept risky setups as the comeback, avoid burning tempo on
+    marginal switches); balanced → current behavior. `riskMode` defaults to
+    `auto` (derived from the board each turn) and can be forced in options;
+    the panel shows which line it's playing and by how much.
+12. **Weather & terrain planning** (done) — weather/terrain actually affect
+    damage now (the reader's Showdown names like `RainDance`/`Grassy Terrain`
+    are normalized to the calc's `Rain`/`Grassy`, so Rain boosts Water moves
+    and Grassy halves Earthquake instead of being silently ignored). The
+    engine values weather/terrain moves by what they unlock (`fieldDamageDelta`
+    simulates the field-after and sums the damage gain), skips re-setting the
+    active condition, credits counter-weather (replacing their Sun stops
+    their boosts) and chip/heal, warns when the new field would help their
+    speed abuser, and anticipates their field-flippers (a revealed Rain Dance
+    or a Drizzle/Drought ability on their active or bench). The stat
+    estimator snapshots the field per hit so learned EVs stay accurate under
+    changing weather.
 
 ## Stage 8: pixel OCR fallback
 
@@ -238,16 +258,18 @@ globals), where `chrome.*` is undefined — the tiny isolated-world script
 page apply to open battles immediately.
 
 - **Options page** (`src/options/`) — toggle the panel, choose the damage
-  engine's stat assumption (typical 252-EV builds vs base stats), and manage
-  the learned profiles (view, delete one, clear all).
+  engine's stat assumption (typical 252-EV builds vs base stats), pick the
+  risk mode (auto / safe / balanced / aggressive), and manage the learned
+  profiles (view, delete one, clear all).
 - **Popup** (`src/popup/`) — quick panel on/off, **Start / Stop watching
   screen** (real tab capture via `chrome.tabCapture` — requires the
   `tabCapture` permission, which the manifest declares), and a link to
   options.
 - **Icons** — generated at build time by `scripts/make-icons.js`, a
   dependency-free PNG encoder (Node's built-in `zlib`).
-- **Settings** (`src/settings.js`) — `panelEnabled` and `statAssumption`,
-  threaded into the engine through `recommend(state, { statAssumption })`.
+- **Settings** (`src/settings.js`) — `panelEnabled`, `statAssumption`, and
+  `riskMode` (auto / safe / balanced / aggressive), threaded into the engine
+  through `recommend(state, { statAssumption, riskMode })`.
 
 ## Stage 4: the Chrome extension
 
@@ -394,6 +416,18 @@ captured from a real battle page and parses identically.
   - Every recommendation carries a **confidence %**: the best move's share vs
     the runner-up move, and the switch's share vs using the best move
     (100% when it's the only option). Shown as badges in the panel.
+  - **Risk modes** (`boardAdvantage` / `resolveRiskMode` / `RISK_MODES`): a
+    board-advantage score (remaining HP + a per-body bonus, both sides)
+    decides who's ahead each turn, and `riskMode` (auto by default) tilts
+    the scoring — ahead → **safe** (the guaranteed KO is worth 14 vs a
+    gamble's 6, being KO'd back hurts more, risky setups are near-useless,
+    and the switch bar drops so the lead stays protected); behind →
+    **aggressive** (the non-guaranteed KO swing is worth 13 — the 60%
+    gamble that wins if it lands — being outsped hurts less, risky setups
+    become the comeback, and the switch bar rises so marginal switches
+    don't bleed tempo). The panel shows the line as a badge: `🛡 playing
+    safe (+230)` or `⚔ playing aggressive (−210)`, and the reasoning
+    explains it. Options can force a mode; auto just reads the board.
   - **Entry hazards are charged into switches** (`hazardDamageOnEntry`):
     Stealth Rock/Steelsurge hit by type effectiveness, Spikes by layer count
     (1/8, 1/6, 1/4) — so the engine stops recommending a switch that eats
@@ -403,10 +437,25 @@ captured from a real battle page and parses identically.
     (Reflect/Light Screen/Aurora Veil) flow into every damage roll through
     the calc's per-side field, and hazard removal (Defog/Rapid Spin/Tidy Up)
     is valued by how many layers are actually up — near zero on a clean field.
-  - **Residual damage is counted** (`chipPerTurn`): burn/poison/weather chip
-    and Leftovers regeneration feed the KO logic — a hit that brings a
-    burned target into chip range counts as a KO ("can KO (chip finishes
-    it)") — and recovery is valued against the chip you're bleeding each turn.
+  - **Residual damage is counted** (`chipPerTurn`): burn/poison/weather chip,
+    Grassy Terrain healing (grounded mons only), and Leftovers regeneration
+    feed the KO logic — a hit that brings a burned target into chip range
+    counts as a KO ("can KO (chip finishes it)") — and recovery is valued
+    against the chip you're bleeding each turn.
+  - **Weather & terrain are played, not just read** (`WEATHER_MOVES` /
+    `TERRAIN_MOVES` / `fieldDamageDelta`): `buildField` normalizes the
+    reader's Showdown field names to the calc's canonical ones (RainDance →
+    Rain, Grassy Terrain → Grassy) so weather/terrain genuinely change every
+    damage roll. Weather/terrain moves are scored by the damage the new
+    field unlocks (Rain Dance's note: "Hydro Pump on Gliscor: 64.6% →
+    96.7%"), never re-set an active condition, get credit for counter-weather
+    ("replaces their Sun"), Sandstorm/Hail chip, and Grassy healing — and
+    are devalued when the field would turn on their speed abuser (setting
+    Rain with their Swift Swim Kingdra on the bench). The engine also
+    anticipates their flips: a revealed Rain Dance on their active or a
+    Drizzle/Drought/Sand Stream ability on their active or bench gets a
+    warning line. The stat estimator snapshots weather/terrain per hit, so
+    learned EVs stay correct under a changing field.
   - **Threat-based switch prediction** (`moveConditionalSwitchProbs`): the
     bench split of the switch probability is conditioned on the move you're
     about to use — a mon that walls or absorbs it becomes the likely reactive

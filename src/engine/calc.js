@@ -97,6 +97,35 @@ function sideEffectsToField(eff = {}) {
   };
 }
 
+// The reader records field conditions as the Showdown log names them
+// (RainDance, SunnyDay, 'Grassy Terrain', …) but the calc only honors its own
+// canonical names (Rain, Sun, Grassy, …) — anything else is silently ignored,
+// which made every weather/terrain damage roll inert. Normalize at the
+// boundary so both the reader's raw names and already-canonical names work.
+export const WEATHER_NAMES = {
+  RainDance: 'Rain',
+  Rain: 'Rain',
+  SunnyDay: 'Sun',
+  Sun: 'Sun',
+  Sandstorm: 'Sandstorm',
+  Hail: 'Hail',
+  Snow: 'Snow',
+  Snowscape: 'Snow',
+};
+export const TERRAIN_NAMES = {
+  'Electric Terrain': 'Electric',
+  Electric: 'Electric',
+  'Grassy Terrain': 'Grassy',
+  Grassy: 'Grassy',
+  'Misty Terrain': 'Misty',
+  Misty: 'Misty',
+  'Psychic Terrain': 'Psychic',
+  Psychic: 'Psychic',
+};
+
+export const canonicalWeather = (name) => WEATHER_NAMES[name] ?? null;
+export const canonicalTerrain = (name) => TERRAIN_NAMES[name] ?? null;
+
 // Compact signature of everything in a Field that affects damage, for cache
 // keys (weather, terrain, and both sides' hazards/screens).
 export function fieldSig(field) {
@@ -110,8 +139,8 @@ export function fieldSig(field) {
 
 export function buildField(state) {
   const opts = {};
-  if (state?.field?.weather) opts.weather = state.field.weather;
-  if (state?.field?.terrain) opts.terrain = state.field.terrain;
+  if (state?.field?.weather) opts.weather = canonicalWeather(state.field.weather) ?? state.field.weather;
+  if (state?.field?.terrain) opts.terrain = canonicalTerrain(state.field.terrain) ?? state.field.terrain;
   // The calc's Field carries per-side effects: the attacker's screens don't
   // help it attack, they protect IT when it defends. Canonical orientation is
   // p1 attacks p2 (attackerSide = p1, defenderSide = p2); damagePercent flips
@@ -119,6 +148,19 @@ export function buildField(state) {
   opts.attackerSide = sideEffectsToField(state?.sides?.p1?.effects);
   opts.defenderSide = sideEffectsToField(state?.sides?.p2?.effects);
   return new Field(opts);
+}
+
+// A new Field identical to `field` but with weather/terrain replaced — how the
+// engine simulates "what if we set Rain Dance / Grassy Terrain now" when
+// scoring those moves.
+export function fieldAfter(field, { weather = null, terrain = null } = {}) {
+  if (!field) return null;
+  return new Field({
+    weather: weather ?? field.weather,
+    terrain: terrain ?? field.terrain,
+    attackerSide: field.attackerSide,
+    defenderSide: field.defenderSide,
+  });
 }
 
 // The calc's screens/hazards apply to whichever side is DEFENDING. buildField

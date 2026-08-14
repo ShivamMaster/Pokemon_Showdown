@@ -67,16 +67,18 @@ test('profileRows: ignores malformed entries without a name', () => {
 // ---------------------------------------------------------------------------
 
 test('renderOptionsHtml: settings controls reflect the stored values', () => {
-  const html = renderOptionsHtml(profiles, { panelEnabled: false, statAssumption: 'base' });
+  const html = renderOptionsHtml(profiles, { panelEnabled: false, statAssumption: 'base', riskMode: 'safe' });
   assert.ok(html.includes('id="psa-panel-enabled"'));
   assert.ok(!/id="psa-panel-enabled" checked/.test(html), 'unchecked when disabled');
   assert.match(html, /<option value="base" selected>/);
+  assert.match(html, /<option value="safe" selected>/);
 });
 
 test('renderOptionsHtml: defaults are applied for missing settings', () => {
   const html = renderOptionsHtml(profiles, undefined);
   assert.match(html, /id="psa-panel-enabled" checked/);
   assert.match(html, /<option value="max" selected>/);
+  assert.match(html, /<option value="auto" selected>/);
 });
 
 test('renderOptionsHtml: renders a row per profile with its learned facts', () => {

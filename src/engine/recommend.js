@@ -22,11 +22,52 @@
 // (species -> weight). Without a profile, sensible defaults apply.
 
 import { SPECIES, MOVES } from '@smogon/calc';
-import { damagePercent, buildField, round1, effectivenessOf } from './calc.js';
+import { damagePercent, buildField, fieldAfter, round1, effectivenessOf } from './calc.js';
 import { worstThreat, teamThreats } from './movepool.js';
 import { speedOrder, speedLine } from './speed.js';
 
 const clamp01 = (n) => Math.max(0, Math.min(1, n));
+
+// Weather/terrain-setting moves -> the field condition they set (canonical
+// calc names, matching what buildField normalizes the reader's names to).
+const WEATHER_MOVES = {
+  'Rain Dance': 'Rain',
+  'Sunny Day': 'Sun',
+  Sandstorm: 'Sandstorm',
+  Hail: 'Hail',
+  Snowscape: 'Snow',
+};
+const TERRAIN_MOVES = {
+  'Electric Terrain': 'Electric',
+  'Grassy Terrain': 'Grassy',
+  'Misty Terrain': 'Misty',
+  'Psychic Terrain': 'Psychic',
+};
+// Abilities that summon a weather/terrain on switch-in (so a mon on their
+// team can flip the field without using a move turn).
+const WEATHER_ABILITIES = {
+  Drought: 'Sun',
+  Drizzle: 'Rain',
+  'Sand Stream': 'Sandstorm',
+  'Snow Warning': 'Snow',
+};
+const TERRAIN_ABILITIES = {
+  'Electric Surge': 'Electric',
+  'Grassy Surge': 'Grassy',
+  'Misty Surge': 'Misty',
+  'Psychic Surge': 'Psychic',
+};
+// Speed abilities that a weather/terrain would turn on — setting that field
+// helps their holder, not just us.
+const WEATHER_SPEED_ABILITIES = {
+  'Swift Swim': 'Rain',
+  Chlorophyll: 'Sun',
+  'Sand Rush': 'Sandstorm',
+  'Slush Rush': 'Snow',
+};
+const TERRAIN_SPEED_ABILITIES = {
+  'Surge Surfer': 'Electric',
+};
 
 const SETUP_MOVES = new Set([
   'Swords Dance', 'Dragon Dance', 'Nasty Plot', 'Calm Mind', 'Bulk Up',
@@ -103,8 +144,9 @@ export function hazardCount(side) {
 // ---------------------------------------------------------------------------
 
 // Net % of max HP this mon gains (positive) or loses (negative) each turn to
-// status chip, weather, and Leftovers. Burn/poison tick 1/16; sand/hail chip
-// everything but the immune types; Leftovers heals 1/16.
+// status chip, weather, terrain, and Leftovers. Burn/poison tick 1/16;
+// sand/hail chip everything but the immune types; Grassy Terrain heals
+// grounded mons 1/16; Leftovers heals 1/16.
 export function chipPerTurn(mon, gen = 9, field = null) {
   if (!mon) return 0;
   let net = 0;
@@ -118,6 +160,12 @@ export function chipPerTurn(mon, gen = 9, field = null) {
         : types.includes('Ice');
     if (types.length && !immune) net -= 6.25;
   }
+  // Grassy Terrain heals grounded mons (not Flying types, not Levitate).
+  if (field?.terrain === 'Grassy') {
+    const types = monTypes(gen, mon.species);
+    const grounded = !types.includes('Flying') && mon.ability !== 'Levitate';
+    if (grounded) net += 6.25;
+  }
   if (mon.item === 'Leftovers' && !mon.itemConsumed) net += 6.25;
   return round1(net);
 }
@@ -126,6 +174,11 @@ export function utilityScore(moveName, hazards = null) {
   if (RECOVERY_MOVES.has(moveName)) return { value: 0.5, note: 'recovery' };
   if (SETUP_MOVES.has(moveName)) return { value: 0.3, note: 'setup' };
   if (STATUS_MOVES.has(moveName)) return { value: 0.35, note: 'status' };
+  // Weather/terrain moves: the base value is low — the real value is computed
+  // per-battle in evaluateMove (the damage delta the new field unlocks, chip,
+  // counter-weather). The utility here just lets them through the gate.
+  if (WEATHER_MOVES[moveName]) return { value: 0.2, note: 'weather' };
+  if (TERRAIN_MOVES[moveName]) return { value: 0.2, note: 'terrain' };
   if (HAZARD_MOVES.has(moveName)) return { value: 0.3, note: 'hazards' };
   if (PIVOT_MOVES.has(moveName)) return { value: 0.15, note: 'pivot' };
   if (moveName === 'Protect') return { value: 0.1, note: 'protect' };
@@ -253,7 +306,7 @@ export function moveConditionalSwitchProbs(moveName, switchProbs, theirTeam, gen
 // Move evaluation
 // ---------------------------------------------------------------------------
 
-export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayProb, switchProbs, gen, field, calcOpts = {}, speed = null, hazards = null) {
+export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayProb, switchProbs, gen, field, calcOpts = {}, speed = null, hazards = null, risk = null) {
   const vsTarget = damagePercent(gen, attacker, theirTarget, moveName, field, calcOpts);
   if (!vsTarget) return null;
 
@@ -287,8 +340,12 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
       const incoming = incomingPercent(theirTarget, attacker, gen, field, calcOpts).pct;
       const ourHp = attacker.hpPercent ?? 100;
       value = util.value + Math.min(0.45, sweep.score * 0.15);
+      // Setting up into a threat that can KO us is usually a throw — but how
+      // much that scares us depends on the mode: ahead, never risk the lead;
+      // behind, the sweep is the comeback, so the risk is acceptable.
+      const setupRisk = (risk ?? RISK_MODES.normal).setupRiskMult;
       if (incoming >= ourHp) {
-        value *= 0.35;
+        value *= setupRisk;
         note = `setup: risky — their ${theirTarget?.species} can KO you (~${round1(incoming)}%) before the boost pays off`;
       } else if (incoming >= 40) {
         value *= 0.7;
@@ -297,6 +354,64 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
         note = `setup: boosted ${sweep.move} 1HKOs ${sweep.oneHko}${sweep.twoHko ? ` / 2HKOs ${sweep.twoHko}` : ''} of their remaining team — worth a turn`;
       }
       if (sweep.score <= 0.5) value *= 0.7; // nothing left to sweep — setup is a waste
+    } else if (WEATHER_MOVES[moveName] || TERRAIN_MOVES[moveName]) {
+      // Weather/terrain moves: score by what the new field unlocks.
+      const weather = WEATHER_MOVES[moveName] ?? null;
+      const terrain = TERRAIN_MOVES[moveName] ?? null;
+      // Setting a condition that's already up is a wasted turn — never
+      // recommend it (mirrors the "already statused" status-move rule).
+      const already = (weather && field?.weather === weather) || (terrain && field?.terrain === terrain);
+      if (already) return null;
+      const after = fieldAfter(field, { weather, terrain });
+      const delta = fieldDamageDelta(attacker, theirTeam, gen, field, after, calcOpts);
+      // The damage unlock is the core value: every ~10% of extra damage is
+      // worth a meaningful chunk of the turn, capped so one big move can't
+      // dominate.
+      value = util.value + Math.min(0.5, delta.total * 0.04);
+      const notes = [];
+      // Counter-weather: replacing THEIR active weather with ours denies their
+      // boosts (their Sun-boosted Fire moves stop, our Rain starts).
+      const theirWeather = field?.weather ?? null;
+      if (weather && theirWeather && weather !== theirWeather) {
+        value += 0.12;
+        notes.push(`replaces their ${theirWeather} (their boosts stop)`);
+      }
+      // Weather chip: Sandstorm/Hail/Snow tick their team every turn.
+      if (weather === 'Sandstorm' || weather === 'Hail' || weather === 'Snow') {
+        const chips = (theirTeam ?? []).filter((m) => chipPerTurn(m, gen, after) < 0).length;
+        if (chips > 0) {
+          value += Math.min(0.25, chips * 0.06);
+          notes.push(`chips ${chips} of their team ~6%/turn`);
+        }
+      }
+      // Grassy Terrain heals our grounded mons every turn.
+      if (terrain === 'Grassy') {
+        const heal = chipPerTurn(attacker, gen, after);
+        if (heal > 0) {
+          value += Math.min(0.15, heal * 0.015);
+          notes.push(`heals you ~${round1(heal)}%/turn`);
+        }
+      }
+      // Danger: does the new field help THEIR speed abusers too? Setting Rain
+      // when their Swift Swim mon sits on the bench gives them the outspeed.
+      const theirAbuser = (theirTeam ?? []).find((m) =>
+        m.ability && (WEATHER_SPEED_ABILITIES[m.ability] === weather || TERRAIN_SPEED_ABILITIES[m.ability] === terrain)
+      );
+      if (theirAbuser) {
+        value *= 0.6;
+        notes.push(`but their ${theirAbuser.species}'s ${theirAbuser.ability} benefits from it too`);
+      }
+      // No real unlock and no counter/chip value — setting it is a dead turn.
+      if (delta.total < 5 && !notes.length) return null;
+      // Speed order shifts: the weather may turn on OUR speed abusers too.
+      const ourAbuser = attacker.ability && (WEATHER_SPEED_ABILITIES[attacker.ability] === weather || TERRAIN_SPEED_ABILITIES[attacker.ability] === terrain);
+      if (delta.best) {
+        notes.push(`${delta.best.move} on ${delta.best.target}: ${delta.best.before}% → ${delta.best.after}%`);
+      }
+      if (ourAbuser) {
+        notes.push(notes.length ? `+ activates your ${attacker.ability} (outspeed)` : `activates your ${attacker.ability} (outspeed)`);
+      }
+      note = notes.join('; ');
     }
     return {
       move: moveName,
@@ -333,23 +448,29 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
   const effHp = targetHp + Math.min(0, chip);
   const ko = vsTarget.max >= effHp;
   const koGuaranteed = vsTarget.min >= effHp;
-  if (ko) score += 10;
+  // Risk-aware KO reward: safe mode prefers the guaranteed roll (a gamble on
+  // a non-guaranteed KO could hand the lead back), aggressive mode prefers
+  // the swing (the 60% roll that wins if it lands is the comeback play).
+  const r = risk ?? RISK_MODES.normal;
+  if (ko) score += r.koBonus(koGuaranteed);
 
   // Speed-order awareness: going for the KO is much safer when we move first,
   // and much riskier when they outspeed us and can hit back before we act.
+  // How much that risk matters depends on the mode — when ahead we avoid the
+  // bad trade, when behind we accept it to take the swing.
   let speedNote = null;
   if (speed) {
     if (speed.weMoveFirst === true && ko) {
-      score += 8;
+      score += r.koFirstBonus;
       speedNote = 'you outspeed — safe to go for the KO';
     } else if (speed.weMoveFirst === false) {
       const theirDmg = incomingPercent(theirTarget, attacker, gen, field, calcOpts).pct;
       const ourHp = attacker.hpPercent ?? 100;
       if (theirDmg >= ourHp) {
-        score -= 12;
+        score -= r.koedFirstPenalty;
         speedNote = `they outspeed and can KO you first (~${round1(theirDmg)}%)`;
       } else if (theirDmg >= 40) {
-        score -= 5;
+        score -= r.outspeedHitPenalty;
         speedNote = `they outspeed — expect ~${round1(theirDmg)}% back before you move`;
       }
     }
@@ -550,6 +671,78 @@ export function bestSwitchIn(ourTeam, theirActive, gen, field, profile = null, c
 }
 
 // ---------------------------------------------------------------------------
+// Risk modes (safe / normal / aggressive)
+// ---------------------------------------------------------------------------
+
+// How far ahead (in %-HP equivalents) we must be to play safe / aggressive.
+const AHEAD_THRESHOLD = 100;
+const BEHIND_THRESHOLD = -100;
+
+// Board advantage in %-HP equivalents: each side's total remaining HP across
+// alive mons plus a per-body bonus (an extra alive mon is worth a lot even at
+// low HP — it can still take hits, threaten, and switch around).
+export function boardAdvantage(ourTeam, theirTeam) {
+  const value = (team) =>
+    (team ?? []).reduce((sum, m) => sum + (m.hpPercent ?? 100), 0) + (team?.length ?? 0) * 40;
+  return round1(value(ourTeam) - value(theirTeam));
+}
+
+// Per-mode scoring knobs. `normal` must exactly match the pre-risk behavior
+// (that's what the existing tests pin down). The philosophy:
+//   safe       — ahead, protect the lead: reward the guaranteed KO, punish
+//                gambling on a risky roll or eating a big hit back; switch
+//                more readily to keep the wincon safe.
+//   aggressive — behind, take the swing: a non-guaranteed KO roll is worth
+//                MORE than the sure thing (the 60% gamble that wins if it
+//                lands); tolerate being outsped; only switch when it's
+//                clearly right (switching bleeds tempo when behind).
+export const RISK_MODES = {
+  safe: {
+    label: 'playing safe',
+    koBonus: (guaranteed) => (guaranteed ? 14 : 6),
+    koFirstBonus: 10,
+    koedFirstPenalty: 16,
+    outspeedHitPenalty: 8,
+    setupRiskMult: 0.2,
+    switchThreshold: 8,
+    threatenedAt: 40,
+    pivotGate: 3,
+  },
+  normal: {
+    label: 'balanced play',
+    koBonus: () => 10,
+    koFirstBonus: 8,
+    koedFirstPenalty: 12,
+    outspeedHitPenalty: 5,
+    setupRiskMult: 0.35,
+    switchThreshold: 12,
+    threatenedAt: 45,
+    pivotGate: 5,
+  },
+  aggressive: {
+    label: 'playing aggressive',
+    koBonus: (guaranteed) => (guaranteed ? 12 : 13),
+    koFirstBonus: 6,
+    koedFirstPenalty: 6,
+    outspeedHitPenalty: 2,
+    setupRiskMult: 0.6,
+    switchThreshold: 16,
+    threatenedAt: 55,
+    pivotGate: 8,
+  },
+};
+
+// 'auto' derives the mode from the board: clearly ahead → safe, clearly
+// behind → aggressive, otherwise balanced. An explicit mode wins.
+export function resolveRiskMode(opts = {}, advantage = 0) {
+  const requested = opts.riskMode ?? 'auto';
+  if (requested === 'safe' || requested === 'normal' || requested === 'aggressive') return requested;
+  if (advantage >= AHEAD_THRESHOLD) return 'safe';
+  if (advantage <= BEHIND_THRESHOLD) return 'aggressive';
+  return 'normal';
+}
+
+// ---------------------------------------------------------------------------
 // Win conditions & setup sweeps
 // ---------------------------------------------------------------------------
 
@@ -584,6 +777,48 @@ export function teamWincon(team, oppTeam, gen, field, calcOpts = {}) {
 }
 
 const SETUP_STAGES = { 'Tail Glow': 2, 'Shell Smash': 2 };
+
+// How much better our best move gets against each of their mons when the field
+// changes from `field` to `after` (e.g. setting Rain Dance or Grassy Terrain).
+// Sums the capped gain per target (a move that already 1HKOs gains nothing);
+// returns the total and the single biggest unlock (move + target + before/after)
+// so the reasoning can name it.
+export function fieldDamageDelta(attacker, theirTeam, gen, field, after, calcOpts = {}) {
+  let total = 0;
+  let best = null;
+  for (const target of theirTeam ?? []) {
+    const hp = target.hpPercent ?? 100;
+    let bestBefore = 0;
+    let bestAfter = 0;
+    let bestMove = null;
+    for (const moveName of attacker?.moves ?? []) {
+      const d1 = damagePercent(gen, attacker, target, moveName, field, calcOpts);
+      const d2 = damagePercent(gen, attacker, target, moveName, after, calcOpts);
+      if (!d1 || !d2 || d1.category === 'Status') continue;
+      const before = Math.min(d1.mean, hp);
+      const afterDmg = Math.min(d2.mean, hp);
+      if (before > bestBefore) bestBefore = before;
+      if (afterDmg > bestAfter) {
+        bestAfter = afterDmg;
+        bestMove = moveName;
+      }
+    }
+    const gain = Math.max(0, bestAfter - bestBefore);
+    if (gain >= 0.5) {
+      total += gain;
+      if (!best || gain > best.gain) {
+        best = {
+          move: bestMove,
+          target: target.species,
+          before: round1(bestBefore),
+          after: round1(bestAfter),
+          gain: round1(gain),
+        };
+      }
+    }
+  }
+  return { total: round1(total), best };
+}
 
 // How many opposing mons a boosted mon would 1HKO / 2HKO with its best move.
 export function sweepPotential(mon, oppTeam, gen, field, calcOpts = {}, stages = 1) {
@@ -684,6 +919,13 @@ export function recommend(state, opts = {}) {
   const hazards = { ours: hazardCount(ourSide), theirs: hazardCount(theirSide) };
   const ourTeam = alivePokemon(ourSide);
   const theirTeam = alivePokemon(theirSide);
+
+  // Risk mode: who's ahead and how we should play it. The advantage is a
+  // board read (total remaining HP + a per-body bonus), and the mode adapts
+  // the scoring so we protect a lead or gamble for a comeback.
+  const advantage = boardAdvantage(ourTeam, theirTeam);
+  const riskMode = resolveRiskMode(opts, advantage);
+  const risk = RISK_MODES[riskMode];
 
   if (!ourTeam.length) {
     const revealed = ourSide?.pokemon?.length ?? 0;
@@ -789,7 +1031,7 @@ export function recommend(state, opts = {}) {
       reasoning.push(`${moveName} is out of PP.`);
       continue;
     }
-    const ev = evaluateMove(ourActive, moveName, theirTarget, theirTeam, stayProb, switchProbs, gen, field, calcOpts, speed, hazards);
+    const ev = evaluateMove(ourActive, moveName, theirTarget, theirTeam, stayProb, switchProbs, gen, field, calcOpts, speed, hazards, risk);
     if (ev) moveEvals.push(ev);
   }
   moveEvals.sort((a, b) => b.score - a.score);
@@ -814,12 +1056,14 @@ export function recommend(state, opts = {}) {
   const inDanger = (ourActive.hpPercent ?? 100) < 25;
   const switchValue = bestSwitch?.net ?? 0;
   // Their active threatens us for a big chunk of HP every turn — a switch that
-  // clearly reduces that is worth it even when our moves score okay.
-  const threatened = (bestSwitch?.nowIn ?? 0) >= 45;
+  // clearly reduces that is worth it even when our moves score okay. The bar
+  // depends on the mode: ahead we preserve the lead more eagerly (lower bar),
+  // behind we avoid burning tempo on marginal switches (higher bar).
+  const threatened = (bestSwitch?.nowIn ?? 0) >= risk.threatenedAt;
   // Recommend a switch when it clearly saves HP and our options are weak, we're
   // in danger, the switch is clearly better than anything we can do, or their
   // active is threatening our current mon hard.
-  if (bestSwitch && switchValue > 12 && (moveIsWeak || inDanger || switchValue > 20 || threatened)) {
+  if (bestSwitch && switchValue > risk.switchThreshold && (moveIsWeak || inDanger || switchValue > 20 || threatened)) {
     switchTo = { ident: bestSwitch.ident, species: bestSwitch.species, score: switchValue, note: bestSwitch.note };
   }
   if (!bestMove && bestSwitch) {
@@ -829,7 +1073,7 @@ export function recommend(state, opts = {}) {
   // damage, so when it's our best option the real play is "inflict the status
   // this turn, then switch to the damage dealer next turn". Recommend the
   // switch as that follow-up whenever a worthwhile pivot exists.
-  if (!switchTo && bestMove?.kind === 'status' && STATUS_MOVES.has(bestMove.move) && bestSwitch && bestSwitch.net > 5) {
+  if (!switchTo && bestMove?.kind === 'status' && STATUS_MOVES.has(bestMove.move) && bestSwitch && bestSwitch.net > risk.pivotGate) {
     switchTo = {
       ident: bestSwitch.ident,
       species: bestSwitch.species,
@@ -872,6 +1116,17 @@ export function recommend(state, opts = {}) {
   const ourWincon = teamWincon(ourTeam, theirTeam, gen, field, calcOpts);
   if (ourWincon && ourWincon.mon.ident !== ourActive.ident && ourTeam.length > 1) {
     reasoning.push(`Your ${ourWincon.mon.species} is your win condition — keep it out of danger.`);
+  }
+
+  // Risk-mode callout: who's ahead, and how that shapes the recommendation.
+  // Only worth a line when it actually changes how we play (not balanced).
+  if (riskMode !== 'normal') {
+    const advTxt = advantage >= 0 ? `+${Math.round(advantage)}` : String(Math.round(advantage));
+    reasoning.push(
+      riskMode === 'safe'
+        ? `You're ahead (~${advTxt}% HP) — ${risk.label}: take the sure line, protect the lead.`
+        : `You're behind (~${advTxt}% HP) — ${risk.label}: take the gamble that wins if it lands.`
+    );
   }
 
   if (bestMove) {
@@ -932,6 +1187,45 @@ export function recommend(state, opts = {}) {
     }
   }
 
+  // Weather/terrain anticipation: if their active (or bench) can flip the
+  // field with a revealed move or a weather/terrain ability, say so — a
+  // weather-dependent plan only holds until they change it.
+  if (theirTarget) {
+    const theirWeatherMove = (theirTarget.moves ?? []).find((m) => WEATHER_MOVES[m] || TERRAIN_MOVES[m]);
+    if (theirWeatherMove) {
+      const sets = WEATHER_MOVES[theirWeatherMove] ?? TERRAIN_MOVES[theirWeatherMove];
+      const alreadyUp =
+        (WEATHER_MOVES[theirWeatherMove] && field?.weather === sets) ||
+        (TERRAIN_MOVES[theirWeatherMove] && field?.terrain === sets);
+      if (!alreadyUp) {
+        reasoning.push(`Their ${theirTarget.species} has ${theirWeatherMove} — the field could flip to ${sets} this turn.`);
+      }
+    }
+    const theirAbility = theirTarget.ability ? (WEATHER_ABILITIES[theirTarget.ability] ?? TERRAIN_ABILITIES[theirTarget.ability]) : null;
+    if (theirAbility) {
+      const alreadyUp =
+        WEATHER_ABILITIES[theirTarget.ability] != null
+          ? field?.weather === theirAbility
+          : field?.terrain === theirAbility;
+      if (!alreadyUp) {
+        reasoning.push(`Their ${theirTarget.species}'s ${theirTarget.ability} sets ${theirAbility} on switch-in — expect ${theirAbility}.`);
+      }
+    } else {
+      // A bench mon with a weather ability is a switch-in warning too.
+      const benchSetter = theirTeam.find(
+        (m) => m.ability && (WEATHER_ABILITIES[m.ability] || TERRAIN_ABILITIES[m.ability])
+      );
+      if (benchSetter) {
+        const ability = WEATHER_ABILITIES[benchSetter.ability] ?? TERRAIN_ABILITIES[benchSetter.ability];
+        const alreadyUp =
+          WEATHER_ABILITIES[benchSetter.ability] != null ? field?.weather === ability : field?.terrain === ability;
+        if (!alreadyUp) {
+          reasoning.push(`Their benched ${benchSetter.species} has ${benchSetter.ability} — it sets ${ability} when switched in.`);
+        }
+      }
+    }
+  }
+
   // Hidden moves: the opponent's active may know something we haven't seen.
   const unknown = theirTarget?.moves?.length ?? 0;
   if (unknown < 4) {
@@ -975,5 +1269,6 @@ export function recommend(state, opts = {}) {
     switchTo: switchTo ? { ...switchTo, confidence: switchConfidence } : null,
     reasoning: reasoning.slice(0, 9),
     note: null,
+    risk: { mode: riskMode, label: risk.label, advantage: Math.round(advantage) },
   };
 }

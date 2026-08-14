@@ -31,6 +31,10 @@ export {
   teamWincon,
   sweepPotential,
   endgameLocks,
+  boardAdvantage,
+  resolveRiskMode,
+  RISK_MODES,
+  fieldDamageDelta,
 } from './recommend.js';
 export {
   potentialMoves,

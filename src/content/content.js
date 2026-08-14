@@ -129,6 +129,7 @@ function render(force = false) {
     ourSideId,
     profile: profileForEngine(currentProfile),
     statAssumption: settings.statAssumption,
+    riskMode: settings.riskMode,
   });
   const model = buildPanelModel(state, {
     ourSideId,

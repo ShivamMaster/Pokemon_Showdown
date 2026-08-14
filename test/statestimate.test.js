@@ -101,6 +101,53 @@ test('narrowStat: defender SpD is estimated from how much it soaks', () => {
   assert.ok(range[0] >= 100, `expected bulky defender range, got ${range}`);
 });
 
+test('applyObservation: fits the hit against the field snapshot at hit time', () => {
+  // Same hit, same observed damage — but Grassy Terrain halves Earthquake for
+  // a grounded defender, so the same damage needs more attacker EVs there.
+  const state = createBattleState();
+  state.gen = 9;
+  state.gametype = 'singles';
+  const atk = createPokemon({ ident: 'p1a: Raging Bolt', side: 'p1', species: 'Raging Bolt', level: 100 });
+  const def = createPokemon({ ident: 'p2a: Toxapex', side: 'p2', species: 'Toxapex', level: 100 });
+  addMove(atk, 'Earthquake');
+  state.sides.p1.pokemon.push(atk);
+  state.sides.p2.pokemon.push(def);
+  // Observe a mid-roll hit from a 100-atk-EV attacker under Grassy Terrain
+  // (which halves Earthquake), so the same damage is consistent under both
+  // the grassy snapshot and a clear field — but implies different EVs.
+  const d = damagePercent(9, atk, def, 'Earthquake', new Field({ terrain: 'Grassy' }), {
+    attackerEvs: { atk: 100 },
+    defenderEvs: { hp: 252, def: 252 },
+    useEstimates: false,
+  });
+  const mid = Math.round(((d.min + d.max) / 2) * 10) / 10;
+  const base = { attacker: atk.ident, defender: def.ident, move: 'Earthquake', damagePct: mid, turn: 1 };
+
+  // Fitted with the correct Grassy snapshot, the damage is consistent and an
+  // atk estimate comes out (Grassy halves EQ, so the spread is wider than it
+  // would be on a clear field — but it exists).
+  applyObservation(state, { ...base, weather: null, terrain: 'Grassy' });
+  const grassy = atk.evEstimate?.atk;
+  delete atk.evEstimate;
+  delete def.evEstimate;
+  // Fitted as if the field were clear, the SAME damage is impossible: full-
+  // power EQ on a max-def defender cannot deal as little as the terrain-
+  // halved hit, so no EV range brackets it. The snapshot decides whether the
+  // observation is even sane — that's the regression this guards.
+  applyObservation(state, { ...base, weather: null, terrain: null });
+  const plain = atk.evEstimate?.atk;
+  assert.ok(grassy, `the Grassy snapshot should make the hit consistent, got ${grassy}`);
+  assert.equal(plain, null, 'the same hit is impossible under a clear field — the snapshot matters');
+
+  // A hand-built observation with NO snapshot keys uses the state's current
+  // field — set Grassy on the state and the same hit becomes consistent again.
+  state.field.terrain = 'Grassy Terrain'; // the reader's raw name
+  delete atk.evEstimate;
+  delete def.evEstimate;
+  applyObservation(state, { ...base });
+  assert.ok(atk.evEstimate?.atk, 'no-snapshot observations fall back to the current field');
+});
+
 test('applyObservation: intersecting observations narrow the range', () => {
   const { state, atk, def } = makeMatchup();
   const mid = observedDamage(atk, def, { spa: 252 }, { hp: 252, spd: 252 });
@@ -182,6 +229,10 @@ test('reader: damage observations recorded from the fixture battle', () => {
   const first = r.state.observations[0];
   assert.ok(first.attacker && first.defender && first.move, 'observation has attacker/defender/move');
   assert.ok(first.damagePct > 0 && first.damagePct <= 100, `damagePct in range, got ${first.damagePct}`);
+  // The field at hit time is snapshotted so the estimator fits the damage
+  // against the right weather/terrain (the fixture's first hit has neither).
+  assert.ok('weather' in first && 'terrain' in first, 'observation snapshots the field');
+  assert.equal(first.terrain, null, 'turn-1 hit lands before Grassy Terrain starts');
 });
 
 test('reader: status/hazard damage ([from] extras) is not recorded', () => {

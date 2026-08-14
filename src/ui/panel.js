@@ -722,7 +722,12 @@ export function renderPanel(model) {
     : null;
 
   const confBadge = (c) => (c != null ? ` <span class="psa-rec-conf" title="How strongly this option is preferred over its alternative">${c}%</span>` : '');
+  // Risk-mode badge: which line we're playing (auto reads the board each turn).
+  const riskHtml = rec?.risk?.mode && rec.risk.mode !== 'normal'
+    ? `<div class="psa-rec-risk psa-risk-${escapeHtml(rec.risk.mode)}" title="${rec.risk.mode === 'safe' ? 'You\'re ahead — taking the sure line, protecting the lead.' : 'You\'re behind — taking the gamble that wins if it lands.'}">${rec.risk.mode === 'safe' ? '🛡' : '⚔'} ${escapeHtml(rec.risk.label)}${rec.risk.advantage != null ? ` (${rec.risk.advantage >= 0 ? '+' : ''}${rec.risk.advantage})` : ''}</div>`
+    : '';
   const recHtml = `<div class="psa-rec">
+  ${riskHtml}
   <div class="psa-rec-row"><span class="psa-rec-label">Best move</span><span class="psa-rec-value">${escapeHtml(rec?.bestMove?.move ?? '—')}${confBadge(rec?.bestMove?.confidence)}</span></div>
   <div class="psa-rec-row"><span class="psa-rec-label">Switch to</span><span class="psa-rec-value">${escapeHtml(rec?.switchTo?.species ?? '—')}${confBadge(rec?.switchTo?.confidence)}</span></div>
   ${rec?.note ? `<div class="psa-rec-note">${escapeHtml(rec.note)}</div>` : ''}

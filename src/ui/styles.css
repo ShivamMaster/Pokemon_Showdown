@@ -245,6 +245,29 @@
   margin-bottom: 8px;
 }
 
+/* Risk-mode badge: which line we're playing and by how much we're ahead/behind */
+.psa-rec-risk {
+  display: inline-block;
+  margin-bottom: 6px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid;
+}
+
+.psa-risk-safe {
+  background: rgba(94, 201, 98, 0.12);
+  border-color: rgba(94, 201, 98, 0.4);
+  color: var(--psa-ok);
+}
+
+.psa-risk-aggressive {
+  background: rgba(255, 107, 107, 0.12);
+  border-color: rgba(255, 107, 107, 0.4);
+  color: #ff8a8a;
+}
+
 .psa-rec-row {
   display: flex;
   justify-content: space-between;

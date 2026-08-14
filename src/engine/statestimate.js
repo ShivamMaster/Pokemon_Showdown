@@ -188,7 +188,15 @@ export function applyObservation(state, obs, gen = state?.gen ?? 9) {
   const attacker = findMon(state, obs.attacker);
   const defender = findMon(state, obs.defender);
   if (!attacker || !defender || !obs.move) return;
-  const field = buildField(state);
+  // The observation carries the weather/terrain at hit time (the reader
+  // snapshots it, even as null when none was up) — fit the damage against
+  // THAT field, since weather and terrain change how much a move deals (Rain
+  // boosts Water, Grassy halves Earthquake). Hand-built observations (tests)
+  // have no snapshot keys at all and fall back to the current field.
+  const hasSnapshot = Object.prototype.hasOwnProperty.call(obs, 'weather') || Object.prototype.hasOwnProperty.call(obs, 'terrain');
+  const field = hasSnapshot
+    ? buildField({ ...state, field: { ...state.field, weather: obs.weather ?? null, terrain: obs.terrain ?? null } })
+    : buildField(state);
 
   let category = null;
   try {

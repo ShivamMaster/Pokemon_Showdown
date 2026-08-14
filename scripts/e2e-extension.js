@@ -458,12 +458,18 @@ try {
         visibleMatchRows: trs.filter(visible).length,
         dmgDisplay: dmg ? getComputedStyle(dmg).display : 'no-dmg-row',
         calcHidden: !visible(panel?.querySelector('.psa-calc-panel')),
+        // Snorlax vs Blissey both at full HP = an even board, so auto risk
+        // mode resolves to balanced and no risk badge should render.
+        riskBadge: !!panel?.querySelector('.psa-rec-risk'),
         panelSample: (panel?.innerText ?? '').slice(0, 180),
       };
     });
     results.compact = state;
     if (!state.compact || !state.hasMatchup || state.visibleMatchRows !== 1 || state.visibleReasoning > 1 || !state.calcHidden) {
       throw new Error(`compact mode did not collapse to one line: ${JSON.stringify(state)}`);
+    }
+    if (state.riskBadge) {
+      throw new Error(`even board should not render a risk badge: ${JSON.stringify(state)}`);
     }
     // The preference survives a page reload.
     await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });

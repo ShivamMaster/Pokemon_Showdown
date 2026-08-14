@@ -514,6 +514,12 @@ export class BattleReader {
       move: last.move,
       damagePct,
       turn: this.state.turn,
+      // The field at hit time: weather/terrain change what damage a move
+      // deals (Rain boosts Water, Grassy halves Earthquake), so the estimator
+      // must fit each hit against the field it actually happened under, not
+      // whatever the battle ends with.
+      weather: this.state.field.weather,
+      terrain: this.state.field.terrain,
     });
     if (this.state.observations.length > 200) {
       this.state.observations.splice(0, this.state.observations.length - 200);
