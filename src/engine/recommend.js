@@ -21,7 +21,8 @@
 // available: profile.switchTendency.atLowHp and profile.commonSwitchIns
 // (species -> weight). Without a profile, sensible defaults apply.
 
-import { damagePercent, buildField, round1 } from './calc.js';
+import { SPECIES, MOVES } from '@smogon/calc';
+import { damagePercent, buildField, round1, effectivenessOf } from './calc.js';
 import { worstThreat, teamThreats } from './movepool.js';
 import { speedOrder, speedLine } from './speed.js';
 
@@ -42,7 +43,86 @@ const STATUS_MOVES = new Set([
 const HAZARD_MOVES = new Set(['Stealth Rock', 'Spikes', 'Toxic Spikes', 'Sticky Web']);
 const PIVOT_MOVES = new Set(['U-turn', 'Volt Switch', 'Flip Turn', 'Teleport', 'Parting Shot']);
 
-export function utilityScore(moveName) {
+// ---------------------------------------------------------------------------
+// Entry hazards (the reader records them in side.effects; the engine charges
+// them on switch-in and values hazard removal by what's actually up)
+// ---------------------------------------------------------------------------
+
+function monTypes(gen, species) {
+  return SPECIES[String(gen)]?.[species]?.types ?? [];
+}
+
+const SPIKES_PCT = [0, 12.5, 100 / 6, 25]; // layers -> % of max HP (1/8, 1/6, 1/4)
+
+// % of max HP a mon loses to entry hazards when switching in onto `side`
+// (Stealth Rock / Steelsurge by type effectiveness, Spikes by layer count).
+export function hazardDamageOnEntry(mon, side, gen = 9) {
+  if (!mon?.species || !side) return 0;
+  const eff = side.effects ?? {};
+  const types = monTypes(gen, mon.species);
+  let pct = 0;
+  if (eff['Stealth Rock']) pct += 12.5 * effectivenessOf(gen, 'Rock', types);
+  if (eff['Steelsurge']) pct += 12.5 * effectivenessOf(gen, 'Steel', types);
+  const spikes = Math.min(3, eff['Spikes'] ?? 0);
+  if (spikes > 0) pct += SPIKES_PCT[spikes];
+  return round1(pct);
+}
+
+// Non-damaging entry effects to warn about (Sticky Web slowdown, Toxic Spikes
+// poisoning). Returns a human note or null. Damage is covered by
+// hazardDamageOnEntry, so only the side effects are reported here.
+export function entryHazardNotes(mon, side, gen = 9) {
+  if (!mon?.species || !side) return null;
+  const eff = side.effects ?? {};
+  const types = monTypes(gen, mon.species);
+  const grounded = !types.includes('Flying') && mon.ability !== 'Levitate';
+  const notes = [];
+  if (eff['Sticky Web'] && grounded) notes.push('slowed by Sticky Web on entry (Speed ×2/3)');
+  const ts = eff['Toxic Spikes'] ?? 0;
+  if (ts > 0) {
+    if (types.includes('Poison')) notes.push('absorbs the Toxic Spikes (Poison type)');
+    else if (grounded) notes.push('will get poisoned by Toxic Spikes on entry');
+  }
+  return notes.length ? notes.join('; ') : null;
+}
+
+// How many hazard layers are currently up on a side (what removal is worth).
+export function hazardCount(side) {
+  const eff = side?.effects ?? {};
+  let n = 0;
+  if (eff['Stealth Rock']) n += 1;
+  if (eff['Steelsurge']) n += 1;
+  n += eff['Spikes'] ?? 0;
+  n += eff['Toxic Spikes'] ?? 0;
+  if (eff['Sticky Web']) n += 1;
+  return n;
+}
+
+// ---------------------------------------------------------------------------
+// Residual damage (status chip, weather, Leftovers)
+// ---------------------------------------------------------------------------
+
+// Net % of max HP this mon gains (positive) or loses (negative) each turn to
+// status chip, weather, and Leftovers. Burn/poison tick 1/16; sand/hail chip
+// everything but the immune types; Leftovers heals 1/16.
+export function chipPerTurn(mon, gen = 9, field = null) {
+  if (!mon) return 0;
+  let net = 0;
+  if (mon.status === 'brn' || mon.status === 'psn') net -= 6.25;
+  const weather = field?.weather;
+  if (weather === 'Sandstorm' || weather === 'Hail' || weather === 'Snow') {
+    const types = monTypes(gen, mon.species);
+    const immune =
+      weather === 'Sandstorm'
+        ? types.includes('Rock') || types.includes('Ground') || types.includes('Steel')
+        : types.includes('Ice');
+    if (types.length && !immune) net -= 6.25;
+  }
+  if (mon.item === 'Leftovers' && !mon.itemConsumed) net += 6.25;
+  return round1(net);
+}
+
+export function utilityScore(moveName, hazards = null) {
   if (RECOVERY_MOVES.has(moveName)) return { value: 0.5, note: 'recovery' };
   if (SETUP_MOVES.has(moveName)) return { value: 0.3, note: 'setup' };
   if (STATUS_MOVES.has(moveName)) return { value: 0.35, note: 'status' };
@@ -50,7 +130,19 @@ export function utilityScore(moveName) {
   if (PIVOT_MOVES.has(moveName)) return { value: 0.15, note: 'pivot' };
   if (moveName === 'Protect') return { value: 0.1, note: 'protect' };
   if (moveName === 'Substitute') return { value: 0.2, note: 'substitute' };
-  if (moveName === 'Rapid Spin' || moveName === 'Defog') return { value: 0.3, note: 'hazard removal' };
+  // Hazard removal is only worth something when there are actually hazards to
+  // remove — with a clean field it's a wasted turn, so it scores near zero.
+  // Rapid Spin/Mortal Spin/Tidy Up clear OUR side; Defog clears both sides.
+  if (moveName === 'Rapid Spin' || moveName === 'Mortal Spin' || moveName === 'Tidy Up') {
+    const n = hazards?.ours ?? 0;
+    const value = n > 0 ? 0.15 + 0.4 * Math.min(1, n / 3) : 0.06;
+    return { value, note: n > 0 ? `hazard removal (${n} layer${n === 1 ? '' : 's'} on your side)` : 'hazard removal (nothing to remove yet)' };
+  }
+  if (moveName === 'Defog') {
+    const total = (hazards?.ours ?? 0) + (hazards?.theirs ?? 0);
+    const value = total > 0 ? 0.15 + 0.4 * Math.min(1, total / 3) : 0.06;
+    return { value, note: total > 0 ? `hazard removal (${total} on the field)` : 'hazard removal (nothing to remove yet)' };
+  }
   return null;
 }
 
@@ -121,15 +213,52 @@ export function mostLikelySwitchIn(team, profile = null) {
 }
 
 // ---------------------------------------------------------------------------
+// Threat-based switch prediction (the "double" read)
+// ---------------------------------------------------------------------------
+
+// Reweight the bench split of `switchProbs` by how well each bench mon
+// answers the move we're about to use: a mon that resists or absorbs the move
+// becomes the likely reactive switch-in (so clicking Earthquake should weight
+// the incoming Landorus heavily), and one the move would wreck becomes less
+// likely. The total switch probability is preserved — only the split among
+// bench mons changes, so P(stay) is untouched.
+export function moveConditionalSwitchProbs(moveName, switchProbs, theirTeam, gen, field, calcOpts = {}) {
+  const total = Object.values(switchProbs ?? {}).reduce((a, b) => a + b, 0);
+  if (total <= 0) return switchProbs ?? {};
+  const moveType = MOVES[String(gen)]?.[moveName]?.type;
+  if (!moveType) return switchProbs;
+  const out = {};
+  let weighted = 0;
+  for (const m of theirTeam ?? []) {
+    const base = switchProbs[m.ident] ?? 0;
+    if (!base) continue;
+    let factor = 1;
+    if (m.species) {
+      const eff = effectivenessOf(gen, moveType, monTypes(gen, m.species));
+      factor =
+        eff === 0 ? 3 : eff <= 0.25 ? 2.5 : eff <= 0.5 ? 2 : eff >= 4 ? 0.15 : eff >= 2 ? 0.35 : 1;
+    }
+    out[m.ident] = base * factor;
+    weighted += out[m.ident];
+  }
+  if (weighted <= 0) return switchProbs;
+  // Keep three decimals: rounding to one would crush small probabilities to
+  // zero and drift the total off its original mass.
+  const scale = total / weighted;
+  for (const k of Object.keys(out)) out[k] = Math.round(out[k] * scale * 1000) / 1000;
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Move evaluation
 // ---------------------------------------------------------------------------
 
-export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayProb, switchProbs, gen, field, calcOpts = {}, speed = null) {
+export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayProb, switchProbs, gen, field, calcOpts = {}, speed = null, hazards = null) {
   const vsTarget = damagePercent(gen, attacker, theirTarget, moveName, field, calcOpts);
   if (!vsTarget) return null;
 
   if (vsTarget.category === 'Status') {
-    const util = utilityScore(moveName);
+    const util = utilityScore(moveName, hazards);
     if (!util) return null;
     // A status-inflicting move (Thunder Wave, Will-O-Wisp, Toxic, …) does
     // nothing if the target is already statused — never keep recommending it.
@@ -142,8 +271,32 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
       const hp = attacker.hpPercent ?? 50; // unknown HP → neutral middle
       const missing = clamp01((100 - hp) / 100);
       value = util.value * clamp01(missing / 0.7); // full value at ≤30% HP
+      // Residual chip makes healing more valuable: a burned mon bleeding
+      // 6.25%/turn needs the heal just to break even; Leftovers already
+      // covers that job, so it doesn't inflate the score.
+      const chip = chipPerTurn(attacker, gen, field);
+      if (chip < 0) value *= 1 + Math.min(0.5, (-chip / 6.25) * 0.3);
       if (value <= 0.03) return null; // ≥~96% HP: don't suggest healing
-      note = `recovery (at ${hp}% HP${missing < 0.15 ? ' — near full, low value' : ''})`;
+      note = `recovery (at ${hp}% HP${missing < 0.15 ? ' — near full, low value' : ''}${chip < 0 ? `, bleeding ${round1(-chip)}%/turn` : ''})`;
+    } else if (SETUP_MOVES.has(moveName)) {
+      // Score setup by the sweep it unlocks: how much of their remaining team
+      // dies after one boost. Setting up into a threat that KOs us is throwing
+      // the turn away, so a deadly active deflates the value hard.
+      const stages = SETUP_STAGES[moveName] ?? 1;
+      const sweep = sweepPotential(attacker, theirTeam, gen, field, calcOpts, stages);
+      const incoming = incomingPercent(theirTarget, attacker, gen, field, calcOpts).pct;
+      const ourHp = attacker.hpPercent ?? 100;
+      value = util.value + Math.min(0.45, sweep.score * 0.15);
+      if (incoming >= ourHp) {
+        value *= 0.35;
+        note = `setup: risky — their ${theirTarget?.species} can KO you (~${round1(incoming)}%) before the boost pays off`;
+      } else if (incoming >= 40) {
+        value *= 0.7;
+        note = `setup: boosted ${sweep.move} clears ${sweep.oneHko ? `${sweep.oneHko} and 2HKOs ${sweep.twoHko}` : sweep.twoHko ? `2HKOs ${sweep.twoHko}` : 'nothing'} of their team — but you take ~${round1(incoming)}% setting up`;
+      } else {
+        note = `setup: boosted ${sweep.move} 1HKOs ${sweep.oneHko}${sweep.twoHko ? ` / 2HKOs ${sweep.twoHko}` : ''} of their remaining team — worth a turn`;
+      }
+      if (sweep.score <= 0.5) value *= 0.7; // nothing left to sweep — setup is a waste
     }
     return {
       move: moveName,
@@ -154,6 +307,10 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
   }
 
   const bench = theirTeam.filter((m) => m.ident !== theirTarget.ident);
+  // The bench split of the switch probability is conditioned on THIS move: a
+  // mon that walls it becomes the likely reactive switch-in (the "double"
+  // read), one it wrecks becomes unlikely. P(stay) is unchanged.
+  const benchProbs = moveConditionalSwitchProbs(moveName, switchProbs, theirTeam, gen, field, calcOpts);
   const benchDmg = bench.map((m) => {
     const d = damagePercent(gen, attacker, m, moveName, field, calcOpts);
     return { ident: m.ident, dmg: d?.mean ?? 0, eff: d?.effectiveness ?? 1 };
@@ -165,11 +322,17 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
   let score = stayProb * cappedActive;
   for (const b of benchDmg) {
     const capped = Math.min(b.dmg, b.dmg > 0 ? (theirTeam.find((m) => m.ident === b.ident)?.hpPercent ?? 100) : 0);
-    score += (switchProbs[b.ident] ?? 0) * capped;
+    score += (benchProbs[b.ident] ?? 0) * capped;
   }
 
-  const ko = vsTarget.max >= targetHp;
-  const koGuaranteed = vsTarget.min >= targetHp;
+  // Residual chip (burn/poison/weather) finishes a low target off without
+  // another hit — a hit that brings them into chip range is effectively a KO.
+  // chip is negative for drains, so the effective HP is targetHp + chip
+  // (healing like Leftovers only raises it and never helps a KO).
+  const chip = chipPerTurn(theirTarget, gen, field);
+  const effHp = targetHp + Math.min(0, chip);
+  const ko = vsTarget.max >= effHp;
+  const koGuaranteed = vsTarget.min >= effHp;
   if (ko) score += 10;
 
   // Speed-order awareness: going for the KO is much safer when we move first,
@@ -196,7 +359,7 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
   const seHits = benchDmg.filter((b) => b.eff >= 2).map((b) => b.ident.split(': ')[1]).slice(0, 2);
   const parts = [`~${vsTarget.mean}% vs ${theirTarget.species}`];
   if (effText) parts.push(effText);
-  if (ko) parts.push(koGuaranteed ? 'guaranteed KO' : 'can KO');
+  if (ko) parts.push(koGuaranteed ? 'guaranteed KO' : chip < 0 ? 'can KO (chip finishes it)' : 'can KO');
   if (speedNote) parts.push(speedNote);
   if (seHits.length) parts.push(`also hits ${seHits.join(', ')} super effectively`);
   const note = `${moveName}: ${parts.join(' · ')}`;
@@ -288,7 +451,7 @@ export function matchupDamage(gen, ourMon, theirMon, field, calcOpts = {}) {
   };
 }
 
-export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, calcOpts = {}, speedCtx = null) {
+export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, calcOpts = {}, speedCtx = null, ourSide = null) {
   const now = incomingPercent(theirActive, ourActive, gen, field, calcOpts);
   const cand = incomingPercent(theirActive, candidate, gen, field, calcOpts);
   const candOff = ownBestDamage(candidate, theirActive, gen, field, calcOpts);
@@ -299,13 +462,19 @@ export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, ca
   const effectiveNow = effectiveIncoming(theirActive, ourActive, gen, field, calcOpts);
   const candEff = effectiveIncoming(theirActive, candidate, gen, field, calcOpts);
   const nowPot = worstThreat(theirActive, ourActive, gen, field, calcOpts);
-  let net = (effectiveNow - candEff) + candOff * 0.15;
+  // Entry hazards on OUR side hit the incoming mon before it acts — charge
+  // them into the comparison, and they can flip an otherwise-good send-in.
+  const hazardDmg = hazardDamageOnEntry(candidate, ourSide, gen);
+  let net = (effectiveNow - candEff) + candOff * 0.15 - hazardDmg;
   if (net <= 0) return null;
   const theirMove = now.move ?? cand.move ?? 'their moves';
   let note =
     `Switch to ${candidate.species}: takes ~${round1(cand.pct)}% from ${theirMove} ` +
     `(vs ~${round1(effectiveNow)}% for ${ourActive.species})` +
+    (hazardDmg > 0 ? `, plus ~${round1(hazardDmg)}% to hazards on entry` : '') +
     (candOff ? `, hits back for ~${round1(candOff)}%` : '');
+  const entryNotes = entryHazardNotes(candidate, ourSide, gen);
+  if (entryNotes) note += `; ${entryNotes}`;
   if (nowPot && nowPot.pct > now.pct) {
     note += `; their ${theirActive?.species} could hit ${ourActive.species} with ${nowPot.move} (~${round1(nowPot.pct)}%)`;
   }
@@ -340,7 +509,7 @@ export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, ca
   };
 }
 
-export function bestSwitchIn(ourTeam, theirActive, gen, field, profile = null, calcOpts = {}) {
+export function bestSwitchIn(ourTeam, theirActive, gen, field, profile = null, calcOpts = {}, ourSide = null) {
   let best = null;
   let bestScore = -Infinity;
   for (const candidate of ourTeam) {
@@ -353,7 +522,9 @@ export function bestSwitchIn(ourTeam, theirActive, gen, field, profile = null, c
     // deals is a bad send-in, and a 4x-weak pick loses to a bulky one unless
     // its offense clearly outweighs the hits it will eat.
     const effIn = effectiveIncoming(theirActive, candidate, gen, field, calcOpts);
-    const score = candOff - effIn;
+    // Entry hazards on our side hit every send-in before it acts.
+    const hazardDmg = hazardDamageOnEntry(candidate, ourSide, gen);
+    const score = candOff - effIn - hazardDmg;
     if (score > bestScore) {
       bestScore = score;
       // Name the move behind the incoming number: the revealed best, or the
@@ -369,11 +540,125 @@ export function bestSwitchIn(ourTeam, theirActive, gen, field, profile = null, c
         candIn: round1(effIn),
         candOff: round1(candOff),
         net: round1(score),
-        note: `Send in ${candidate.species}: takes ~${round1(effIn)}% from ${threatName}${candOff ? `, hits back for ~${round1(candOff)}%` : ''}`,
+        note: `Send in ${candidate.species}: takes ~${round1(effIn)}% from ${threatName}` +
+          `${hazardDmg > 0 ? `, plus ~${round1(hazardDmg)}% to hazards on entry` : ''}` +
+          `${candOff ? `, hits back for ~${round1(candOff)}%` : ''}`,
       };
     }
   }
   return best;
+}
+
+// ---------------------------------------------------------------------------
+// Win conditions & setup sweeps
+// ---------------------------------------------------------------------------
+
+// A mon's offensive value against the opposing team: expected damage per turn
+// across every alive member, capped at each target's remaining HP (overkill
+// doesn't count). The team's win condition is the mon with the most of it.
+export function offensiveValue(mon, oppTeam, gen, field, calcOpts = {}) {
+  if (!mon) return 0;
+  let total = 0;
+  for (const target of oppTeam ?? []) {
+    let best = 0;
+    for (const moveName of mon.moves ?? []) {
+      const d = damagePercent(gen, mon, target, moveName, field, calcOpts);
+      if (d?.mean && d.mean > best) best = d.mean;
+    }
+    total += Math.min(best, target.hpPercent ?? 100);
+  }
+  return round1(total);
+}
+
+export function teamWincon(team, oppTeam, gen, field, calcOpts = {}) {
+  let best = null;
+  let bestVal = -Infinity;
+  for (const m of team ?? []) {
+    const val = offensiveValue(m, oppTeam, gen, field, calcOpts);
+    if (val > bestVal) {
+      bestVal = val;
+      best = m;
+    }
+  }
+  return best ? { mon: best, value: bestVal } : null;
+}
+
+const SETUP_STAGES = { 'Tail Glow': 2, 'Shell Smash': 2 };
+
+// How many opposing mons a boosted mon would 1HKO / 2HKO with its best move.
+export function sweepPotential(mon, oppTeam, gen, field, calcOpts = {}, stages = 1) {
+  let oneHko = 0;
+  let twoHko = 0;
+  let move = null;
+  let bestDmg = 0;
+  for (const target of oppTeam ?? []) {
+    let best = 0;
+    let bestName = null;
+    for (const moveName of mon.moves ?? []) {
+      if (damagePercent(gen, mon, target, moveName, field, calcOpts)?.category === 'Status') continue;
+      const boosted = {
+        ...mon,
+        boosts: {
+          ...(mon.boosts ?? {}),
+          atk: (mon.boosts?.atk ?? 0) + stages,
+          spa: (mon.boosts?.spa ?? 0) + stages,
+        },
+      };
+      const d = damagePercent(gen, boosted, target, moveName, field, calcOpts);
+      if (d?.mean && d.mean > best) {
+        best = d.mean;
+        bestName = moveName;
+      }
+    }
+    const hp = target.hpPercent ?? 100;
+    if (best >= hp) oneHko += 1;
+    else if (best >= hp / 2) twoHko += 1;
+    if (best > bestDmg) {
+      bestDmg = best;
+      move = bestName;
+    }
+  }
+  return { oneHko, twoHko, score: round1(oneHko + twoHko * 0.5), move };
+}
+
+// ---------------------------------------------------------------------------
+// Endgame lock-in logic
+// ---------------------------------------------------------------------------
+
+// Pairwise 1v1 verdicts once the battle is down to a few mons (≤4 alive
+// total): who wins each duel given best moves, remaining HP, and speed order.
+export function endgameLocks(ourTeam, theirTeam, gen, field, calcOpts = {}, state = null, ourSideId = 'p1') {
+  if (!ourTeam?.length || !theirTeam?.length) return [];
+  if (ourTeam.length + theirTeam.length > 4) return [];
+  const out = [];
+  for (const ours of ourTeam) {
+    for (const theirs of theirTeam) {
+      const ourDmg = ownBestDamage(ours, theirs, gen, field, calcOpts);
+      const theirDmg = ownBestDamage(theirs, ours, gen, field, calcOpts);
+      const ourHp = ours.hpPercent ?? 100;
+      const theirHp = theirs.hpPercent ?? 100;
+      const ourTurns = ourDmg > 0 ? Math.ceil(theirHp / ourDmg) : Infinity;
+      const theirTurns = theirDmg > 0 ? Math.ceil(ourHp / theirDmg) : Infinity;
+      const order = state ? speedOrder(ours, theirs, gen, state, ourSideId) : null;
+      const weFirst = order?.weMoveFirst === true;
+      let verdict;
+      if (ourDmg <= 0 && theirDmg > 0) verdict = 'lose';
+      else if (theirDmg <= 0 && ourDmg > 0) verdict = 'win';
+      else if (ourTurns === Infinity && theirTurns === Infinity) verdict = 'stall';
+      else if (ourTurns < theirTurns) verdict = 'win';
+      else if (theirTurns < ourTurns) verdict = 'lose';
+      else verdict = weFirst ? 'win' : 'close';
+      out.push({
+        ours: ours.species,
+        theirs: theirs.species,
+        ourTurns: ourTurns === Infinity ? null : ourTurns,
+        theirTurns: theirTurns === Infinity ? null : theirTurns,
+        weFirst,
+        verdict,
+      });
+    }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +681,7 @@ export function recommend(state, opts = {}) {
   }
 
   const field = buildField(state);
+  const hazards = { ours: hazardCount(ourSide), theirs: hazardCount(theirSide) };
   const ourTeam = alivePokemon(ourSide);
   const theirTeam = alivePokemon(theirSide);
 
@@ -431,7 +717,7 @@ export function recommend(state, opts = {}) {
 
   // Our active is down — must send in a replacement.
   if (!ourActive) {
-    const s = bestSwitchIn(ourTeam, theirActive, gen, field, profile, calcOpts);
+    const s = bestSwitchIn(ourTeam, theirActive, gen, field, profile, calcOpts, ourSide);
     return {
       bestMove: null,
       switchTo: s,
@@ -503,7 +789,7 @@ export function recommend(state, opts = {}) {
       reasoning.push(`${moveName} is out of PP.`);
       continue;
     }
-    const ev = evaluateMove(ourActive, moveName, theirTarget, theirTeam, stayProb, switchProbs, gen, field, calcOpts, speed);
+    const ev = evaluateMove(ourActive, moveName, theirTarget, theirTeam, stayProb, switchProbs, gen, field, calcOpts, speed, hazards);
     if (ev) moveEvals.push(ev);
   }
   moveEvals.sort((a, b) => b.score - a.score);
@@ -513,7 +799,7 @@ export function recommend(state, opts = {}) {
   if (!justBroughtIn) {
     switchEvals = bench
       .filter((m) => !recentlyLeft(m))
-      .map((m) => evaluateSwitch(ourActive, m, theirTarget, gen, field, calcOpts, speedCtx))
+      .map((m) => evaluateSwitch(ourActive, m, theirTarget, gen, field, calcOpts, speedCtx, ourSide))
       .filter(Boolean)
       .sort((a, b) => b.net - a.net);
   } else {
@@ -550,6 +836,42 @@ export function recommend(state, opts = {}) {
       score: bestSwitch.net,
       note: `After ${bestMove.move} on ${theirTarget.species}, ${bestSwitch.note.replace(/^Switch to /, 'switch to ')}`,
     };
+  }
+
+  // Endgame lock-in: with few mons left, call out the pairings that are
+  // decided — the wins to take and the losses to avoid.
+  const locks = endgameLocks(ourTeam, theirTeam, gen, field, calcOpts, state, ourSideId);
+  if (locks.length) {
+    const ourWins = locks.filter((l) => l.verdict === 'win');
+    const theirWins = locks.filter((l) => l.verdict === 'lose');
+    if (ourWins.length) {
+      const w = ourWins[0];
+      reasoning.push(
+        `Endgame: your ${w.ours} beats their ${w.theirs} 1v1 (${w.ourTurns}HKO vs their ${w.theirTurns}HKO${w.weFirst ? ', you move first' : ''}) — locked in.`
+      );
+    }
+    if (theirWins.length && !ourWins.some((w) => w.theirs === theirWins[0].theirs)) {
+      const l = theirWins[0];
+      reasoning.push(`Endgame: their ${l.theirs} beats your ${l.ours} 1v1 — avoid that pairing.`);
+    }
+  }
+  // Win-condition read: who ends the game for each side.
+  const theirWincon = teamWincon(theirTeam, ourTeam, gen, field, calcOpts);
+  if (theirWincon) {
+    const t = theirWincon.mon;
+    if (t.ident === theirTarget?.ident) {
+      reasoning.push(
+        bestMove?.ko
+          ? `Their ${t.species} is their win condition — this move can KO it, take the shot.`
+          : `Their ${t.species} is their win condition — play around it.`
+      );
+    } else if (theirTeam.length <= 3) {
+      reasoning.push(`Their ${t.species} is their win condition (threatens your team for ~${theirWincon.value}% total).`);
+    }
+  }
+  const ourWincon = teamWincon(ourTeam, theirTeam, gen, field, calcOpts);
+  if (ourWincon && ourWincon.mon.ident !== ourActive.ident && ourTeam.length > 1) {
+    reasoning.push(`Your ${ourWincon.mon.species} is your win condition — keep it out of danger.`);
   }
 
   if (bestMove) {
@@ -651,7 +973,7 @@ export function recommend(state, opts = {}) {
       ? { move: bestMove.move, score: bestMove.score, note: bestMove.note, expected: bestMove.expected, confidence: moveConfidence }
       : null,
     switchTo: switchTo ? { ...switchTo, confidence: switchConfidence } : null,
-    reasoning: reasoning.slice(0, 7),
+    reasoning: reasoning.slice(0, 9),
     note: null,
   };
 }

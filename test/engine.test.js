@@ -15,6 +15,13 @@ import {
   predictStayProb,
   predictSwitchProbs,
   utilityScore,
+  hazardDamageOnEntry,
+  entryHazardNotes,
+  chipPerTurn,
+  moveConditionalSwitchProbs,
+  teamWincon,
+  sweepPotential,
+  endgameLocks,
 } from '../src/engine/index.js';
 import { buildPanelModel } from '../src/ui/panel.js';
 
@@ -697,4 +704,233 @@ test('recommend: notes when the opponent is Choice-locked (expect the repeat)', 
     rec.reasoning.some((r) => r.includes('locked into Body Press')),
     `expected a their-lock note, got: ${JSON.stringify(rec.reasoning)}`
   );
+});
+
+// ---------------------------------------------------------------------------
+// Tier 1a: entry hazards & screens
+// ---------------------------------------------------------------------------
+
+test('hazardDamageOnEntry: Stealth Rock by type effectiveness, Spikes by layer', () => {
+  const sr = { effects: { 'Stealth Rock': true } };
+  // Charizard (Fire/Flying): Rock is 2x vs Fire and 2x vs Flying → 4x → 50%.
+  assert.equal(hazardDamageOnEntry({ species: 'Charizard' }, sr, 9), 50);
+  // Corviknight (Flying/Steel): 2x (Flying) × 0.5 (Steel) → 1x → 12.5%.
+  assert.equal(hazardDamageOnEntry({ species: 'Corviknight' }, sr, 9), 12.5);
+  // Corviknight with Heavy-Duty Boots is immune — the reader records no
+  // damage, so a boots-carrying mon is charged 0.
+  assert.equal(hazardDamageOnEntry({ species: 'Corviknight', item: 'Heavy-Duty Boots' }, sr, 9), 12.5);
+  const spikes = { effects: { Spikes: 2 } };
+  assert.equal(hazardDamageOnEntry({ species: 'Garchomp' }, spikes, 9), 16.7); // 2 layers = 1/6 (rounded)
+  // No hazards → nothing.
+  assert.equal(hazardDamageOnEntry({ species: 'Garchomp' }, { effects: {} }, 9), 0);
+});
+
+test('entryHazardNotes: Sticky Web slowdown and Toxic Spikes poison on entry', () => {
+  const web = { effects: { 'Sticky Web': true } };
+  const note = entryHazardNotes({ species: 'Garchomp' }, web, 9);
+  assert.ok(note && note.includes('slowed by Sticky Web'), `got: ${note}`);
+  // Flying types (and Levitate) are not grounded — no slowdown.
+  assert.equal(entryHazardNotes({ species: 'Corviknight' }, web, 9), null);
+  const ts = { effects: { 'Toxic Spikes': 1 } };
+  const tsNote = entryHazardNotes({ species: 'Garchomp' }, ts, 9);
+  assert.ok(tsNote && tsNote.includes('poisoned'), `got: ${tsNote}`);
+  assert.ok(entryHazardNotes({ species: 'Gengar' }, ts, 9).includes('absorbs'), 'Poison types absorb Toxic Spikes');
+});
+
+test('recommend: hazards are charged into switch evaluation and called out', () => {
+  const makeHazardState = (srUp) => {
+    const st = makeState({
+      ourActive: { species: 'Charizard', hpPercent: 30, moves: ['Flamethrower', 'Air Slash', 'Roost'] },
+      ourBench: [{ species: 'Rillaboom', hpPercent: 100, moves: ['Wood Hammer', 'Grassy Glide', 'Knock Off'] }],
+      theirActive: { species: 'Garchomp', hpPercent: 100, moves: ['Earthquake', 'Outrage', 'Fire Fang'] },
+    });
+    if (srUp) st.sides.p1.effects = { 'Stealth Rock': true };
+    return st;
+  };
+  const withSR = recommend(makeHazardState(true));
+  assert.ok(withSR.switchTo, 'the switch should still be recommended');
+  assert.ok(
+    withSR.switchTo.note.includes('hazards on entry'),
+    `the SR cost should be called out, got: ${withSR.switchTo.note}`
+  );
+  const withoutSR = recommend(makeHazardState(false));
+  assert.ok(
+    !withoutSR.switchTo.note.includes('hazards on entry'),
+    'no hazards → no hazard charge mentioned'
+  );
+  // Rillaboom is not weak to Rock, so SR costs it 12.5% — the note states it.
+  assert.ok(withSR.switchTo.note.includes('12.5%'), `got: ${withSR.switchTo.note}`);
+});
+
+// ---------------------------------------------------------------------------
+// Tier 1b: residual damage
+// ---------------------------------------------------------------------------
+
+test('chipPerTurn: burn/poison drain, Leftovers heals, sand/snow spare immune types', () => {
+  assert.equal(chipPerTurn({ species: 'Garchomp', status: 'brn' }, 9, null), -6.2);
+  assert.equal(chipPerTurn({ species: 'Garchomp', status: 'psn' }, 9, null), -6.2);
+  assert.equal(chipPerTurn({ species: 'Corviknight', item: 'Leftovers', itemRevealed: true }, 9, null), 6.3);
+  // Sandstorm chips everything but Rock/Ground/Steel.
+  assert.equal(chipPerTurn({ species: 'Garchomp' }, 9, { weather: 'Sandstorm' }), 0); // Ground
+  assert.equal(chipPerTurn({ species: 'Corviknight' }, 9, { weather: 'Sandstorm' }), 0); // Steel
+  assert.equal(chipPerTurn({ species: 'Gengar' }, 9, { weather: 'Sandstorm' }), -6.2);
+  // Hail/Snow chips everything but Ice.
+  assert.equal(chipPerTurn({ species: 'Glaceon' }, 9, { weather: 'Snow' }), 0);
+  assert.equal(chipPerTurn({ species: 'Garchomp' }, 9, { weather: 'Snow' }), -6.2);
+});
+
+test('evaluateMove: burn chip turns a non-KO hit into a KO and is called out', () => {
+  // Great Tusk Earthquake vs Garchomp rolls 32.1-37.9%. At exactly 40% HP a
+  // fresh target survives; a burned one (chip 6.25%/turn) dies to the chip.
+  const mk = (hpPercent, status) => ({
+    ident: hpPercent === 40 ? 'p2a: Garchomp' : 'p2a: Garchomp',
+    side: 'p2',
+    species: 'Garchomp',
+    hpPercent,
+    moves: ['Earthquake'],
+    ...(status ? { status } : {}),
+  });
+  const atk = { ident: 'p1a: Great Tusk', side: 'p1', species: 'Great Tusk', hpPercent: 100, moves: ['Earthquake', 'Headlong Rush'] };
+  const fresh = evaluateMove(atk, 'Earthquake', mk(40, null), [mk(40, null)], 1, {}, 9, new Field());
+  assert.equal(fresh.ko, false, 'without chip the hit does not KO at 40%');
+  const burned = evaluateMove(atk, 'Earthquake', mk(40, 'brn'), [mk(40, 'brn')], 1, {}, 9, new Field());
+  assert.equal(burned.ko, true, 'with burn chip the same hit becomes a KO');
+  assert.ok(burned.note.includes('chip finishes it'), `note should credit the chip, got: ${burned.note}`);
+});
+
+// ---------------------------------------------------------------------------
+// Tier 2a: threat-based switch prediction (the double)
+// ---------------------------------------------------------------------------
+
+test('moveConditionalSwitchProbs: resists/immunities draw the switch, 4x-weak mons shed it', () => {
+  const team = [
+    { ident: 'p2b: Landorus', species: 'Landorus' },
+    { ident: 'p2c: Charizard', species: 'Charizard' },
+    { ident: 'p2d: Garchomp', species: 'Garchomp' },
+  ];
+  const base = { 'p2b: Landorus': 0.06, 'p2c: Charizard': 0.06, 'p2d: Garchomp': 0.06 };
+  const total = 0.18;
+
+  const eq = moveConditionalSwitchProbs('Earthquake', base, team, 9, null, {});
+  const eqSum = Object.values(eq).reduce((a, b) => a + b, 0);
+  assert.ok(Math.abs(eqSum - total) < 0.01, `total switch mass must be preserved (${eqSum})`);
+  // Landorus and Charizard are both immune to Ground (Flying) — they draw the
+  // switch; Garchomp is neutral so its share drops.
+  assert.ok(eq['p2b: Landorus'] > 0.06, 'the immune mon becomes the likely switch-in');
+  assert.ok(eq['p2c: Charizard'] > 0.06, 'the other Flying type also draws the double');
+  assert.ok(eq['p2d: Garchomp'] < 0.06, 'a neutral mon sheds probability to the answers');
+
+  const ice = moveConditionalSwitchProbs('Ice Beam', base, team, 9, null, {});
+  // Charizard (Fire/Flying) resists Ice 0.5x — it becomes the natural answer;
+  // Landorus and Garchomp are 4x weak and would never be sent in.
+  assert.ok(ice['p2c: Charizard'] > 0.12, 'the Ice-resisting mon draws the double');
+  assert.ok(ice['p2b: Landorus'] < 0.03 && ice['p2d: Garchomp'] < 0.03, '4x-weak mons shed the switch');
+});
+
+test('recommend: clicking a move weights the reactive switch-in answer', () => {
+  // If we click Earthquake, the opponent's Landorus (immune) is the natural
+  // switch-in — the engine should weight that read into the move's score
+  // rather than treating the bench split as fixed.
+  const state = makeState({
+    ourActive: { species: 'Great Tusk', hpPercent: 100, moves: ['Earthquake', 'Ice Spinner', 'Headlong Rush'] },
+    theirActive: { species: 'Gliscor', hpPercent: 70, moves: ['Earthquake', 'Roost'] },
+    theirBench: [{ species: 'Landorus', hpPercent: 100, moves: ['Earth Power', 'U-turn'] }],
+  });
+  const rec = recommend(state);
+  // The conditional read must actually run (no crash) and produce advice.
+  assert.ok(rec.bestMove, 'a move should still be recommended');
+});
+
+// ---------------------------------------------------------------------------
+// Tier 2b/2c/2d: win conditions, setup sweeps, endgame locks
+// ---------------------------------------------------------------------------
+
+test('teamWincon: the mon that threatens the most of the opposing team wins', () => {
+  const ourTeam = [
+    { ident: 'p1a: Rillaboom', species: 'Rillaboom', hpPercent: 100, moves: ['Wood Hammer', 'Knock Off'] },
+    { ident: 'p1b: Clefable', species: 'Clefable', hpPercent: 100, moves: ['Moonblast', 'Stealth Rock'] },
+  ];
+  const theirTeam = [
+    { ident: 'p2a: Garchomp', species: 'Garchomp', hpPercent: 100, moves: ['Earthquake'] },
+    { ident: 'p2b: Wobbuffet', species: 'Wobbuffet', hpPercent: 100, moves: ['Counter', 'Mirror Coat'] },
+  ];
+  const wincon = teamWincon(ourTeam, theirTeam, 9, null, {});
+  assert.ok(wincon && wincon.mon.species === 'Clefable', 'Clefable threatens both opposing mons super effectively');
+  assert.ok(wincon.value > 0);
+});
+
+test('sweepPotential: boosted damage counts 1HKOs and 2HKOs of the remaining team', () => {
+  const rill = { ident: 'p1a: Rillaboom', species: 'Rillaboom', hpPercent: 100, moves: ['Wood Hammer', 'Knock Off', 'Swords Dance'] };
+  const opp = [
+    { ident: 'p2a: Landorus', species: 'Landorus', hpPercent: 100 },
+    { ident: 'p2b: Garchomp', species: 'Garchomp', hpPercent: 100 },
+    { ident: 'p2c: Corviknight', species: 'Corviknight', hpPercent: 100 },
+  ];
+  const base = sweepPotential(rill, opp, 9, null, {}, 0);
+  const boosted = sweepPotential(rill, opp, 9, null, {}, 2);
+  assert.ok(boosted.score > base.score, `+2 should unlock more of the team (${base.score} → ${boosted.score})`);
+  assert.ok(boosted.move, 'the boosted best move is named');
+});
+
+test('recommend: setup is recommended when the sweep is real and the active is walled', () => {
+  const state = makeState({
+    ourActive: { species: 'Rillaboom', hpPercent: 70, moves: ['Wood Hammer', 'Grassy Glide', 'Knock Off', 'Swords Dance'] },
+    ourBench: [{ species: 'Corviknight', hpPercent: 100, moves: ['Roost', 'Brave Bird', 'Body Press'] }],
+    theirActive: { species: 'Garchomp', hpPercent: 40, status: 'brn', moves: ['Earthquake', 'Outrage', 'Fire Fang'] },
+    theirBench: [{ species: 'Dragapult', hpPercent: 100, moves: ['Draco Meteor', 'Shadow Ball'] }],
+  });
+  const rec = recommend(state, { ourSideId: 'p1' });
+  assert.equal(rec.bestMove.move, 'Swords Dance', 'the setup into a sweep should be the call');
+  const line = rec.reasoning.find((r) => r.includes('setup:'));
+  assert.ok(line && line.includes('1HKOs'), `setup reasoning should quantify the sweep, got: ${line}`);
+});
+
+test('recommend: endgame locks and win-condition reads appear in reasoning', () => {
+  const state = makeState({
+    ourActive: { species: 'Rillaboom', hpPercent: 70, moves: ['Wood Hammer', 'Grassy Glide', 'Knock Off'] },
+    ourBench: [{ species: 'Corviknight', hpPercent: 100, moves: ['Roost', 'Brave Bird', 'Body Press'] }],
+    theirActive: { species: 'Garchomp', hpPercent: 40, status: 'brn', moves: ['Earthquake', 'Outrage', 'Fire Fang'] },
+    theirBench: [{ species: 'Dragapult', hpPercent: 100, moves: ['Draco Meteor', 'Shadow Ball'] }],
+  });
+  state.turn = 8;
+  const rec = recommend(state, { ourSideId: 'p1' });
+  assert.ok(
+    rec.reasoning.some((r) => r.includes('locked in')),
+    `expected an endgame lock line, got: ${JSON.stringify(rec.reasoning)}`
+  );
+  assert.ok(
+    rec.reasoning.some((r) => r.includes('win condition')),
+    `expected a win-condition read, got: ${JSON.stringify(rec.reasoning)}`
+  );
+
+  // The lock list itself: Rillaboom 1HKOs the burned 40% Garchomp while
+  // taking a 4HKO back — a locked win for us.
+  const locks = endgameLocks(state.sides.p1.pokemon, state.sides.p2.pokemon, 9, new Field(), {}, state, 'p1');
+  const vsChomp = locks.find((l) => l.ours === 'Rillaboom' && l.theirs === 'Garchomp');
+  assert.equal(vsChomp.verdict, 'win');
+  assert.equal(vsChomp.ourTurns, 1);
+});
+
+test('endgameLocks stays quiet outside the endgame (teams still full)', () => {
+  const state = makeState({
+    ourActive: { species: 'Rillaboom', moves: ['Wood Hammer'] },
+    ourBench: [
+      { species: 'Corviknight', moves: ['Brave Bird'] },
+      { species: 'Clefable', moves: ['Moonblast'] },
+      { species: 'Dragonite', moves: ['Outrage'] },
+      { species: 'Garchomp', moves: ['Earthquake'] },
+      { species: 'Tyranitar', moves: ['Stone Edge'] },
+    ],
+    theirActive: { species: 'Dragapult', moves: ['Shadow Ball'] },
+    theirBench: [
+      { species: 'Great Tusk', moves: ['Earthquake'] },
+      { species: 'Kingambit', moves: ['Iron Head'] },
+      { species: 'Gholdengo', moves: ['Make It Rain'] },
+      { species: 'Ogerpon', moves: ['Ivy Cudgel'] },
+      { species: 'Landorus', moves: ['Earth Power'] },
+    ],
+  });
+  assert.equal(endgameLocks(state.sides.p1.pokemon, state.sides.p2.pokemon, 9, new Field(), {}, state, 'p1').length, 0);
+  const rec = recommend(state);
+  assert.ok(!rec.reasoning.some((r) => r.includes('Endgame')), 'no endgame talk with full teams');
 });

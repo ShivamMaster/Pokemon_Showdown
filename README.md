@@ -23,6 +23,12 @@ best move, built in stages:
 9. **Speed-order awareness** (done) — the engine compares effective Speed
    (EV ranges, boosts, paralysis, Choice Scarf, weather abilities, Tailwind,
    Trick Room) and factors who moves first into move and switch advice.
+10. **Pro-level engine depth** (done) — the engine plays for win conditions:
+    entry hazards and screens are charged into every damage and switch roll,
+    residual chip (burn/poison/weather/Leftovers) counts toward KOs, switch
+    prediction is threat-based (the move you click draws the mon that walls
+    it), setup moves are scored by the sweep they unlock, and the endgame is
+    enumerated into locked 1v1s. All fed into the reasoning the panel shows.
 
 ## Stage 8: pixel OCR fallback
 
@@ -388,6 +394,41 @@ captured from a real battle page and parses identically.
   - Every recommendation carries a **confidence %**: the best move's share vs
     the runner-up move, and the switch's share vs using the best move
     (100% when it's the only option). Shown as badges in the panel.
+  - **Entry hazards are charged into switches** (`hazardDamageOnEntry`):
+    Stealth Rock/Steelsurge hit by type effectiveness, Spikes by layer count
+    (1/8, 1/6, 1/4) — so the engine stops recommending a switch that eats
+    25%+ just entering, and the reasoning says "plus ~X% to hazards on
+    entry". Non-damaging entry effects are called out too (Sticky Web
+    slowdown, Toxic Spikes poison, or a Poison type absorbing them). Screens
+    (Reflect/Light Screen/Aurora Veil) flow into every damage roll through
+    the calc's per-side field, and hazard removal (Defog/Rapid Spin/Tidy Up)
+    is valued by how many layers are actually up — near zero on a clean field.
+  - **Residual damage is counted** (`chipPerTurn`): burn/poison/weather chip
+    and Leftovers regeneration feed the KO logic — a hit that brings a
+    burned target into chip range counts as a KO ("can KO (chip finishes
+    it)") — and recovery is valued against the chip you're bleeding each turn.
+  - **Threat-based switch prediction** (`moveConditionalSwitchProbs`): the
+    bench split of the switch probability is conditioned on the move you're
+    about to use — a mon that walls or absorbs it becomes the likely reactive
+    switch-in (the "double" read: clicking Earthquake weights the incoming
+    Landorus), a mon it would wreck sheds probability. P(stay) is unchanged;
+    only the split among bench mons moves.
+  - **Win-condition tracking** (`teamWincon` / `offensiveValue`): the engine
+    identifies each side's biggest threat — the mon that threatens the most
+    of the opposing team — and says so: "Their X is their win condition —
+    play around it" (or "this move can KO it, take the shot") and "Your Y is
+    your win condition — keep it out of danger".
+  - **Setup & sweep lines** (`sweepPotential`): a setup move (Swords Dance,
+    Dragon Dance, Calm Mind, Shell Smash, …) is scored by the sweep it
+    unlocks — how many of their remaining mons a boosted best move 1HKOs /
+    2HKOs — and only recommended when you can take their active's hit
+    (setting up into something that KOs you is deflated hard and flagged
+    "risky").
+  - **Endgame lock-in logic** (`endgameLocks`): once the battle is down to
+    ≤4 mons, the engine enumerates the remaining 1v1s (best moves, remaining
+    HP, speed order) and calls out the decided ones: "your Rillaboom beats
+    their Garchomp 1v1 (1HKO vs their 4HKO) — locked in" and "their Dragapult
+    beats your X 1v1 — avoid that pairing".
 - **Active-matchup view** — the panel shows your lead vs their lead side by
   side: HP, all five stats (exact for you, estimated ranges for them that
   narrow with learned EVs / hovered Spe), item, and ability, with the

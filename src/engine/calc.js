@@ -84,11 +84,58 @@ export function buildPokemon(gen, mon, evs = {}, teraType = null, useEstimates =
   return new Pokemon(gen, mon?.species, opts);
 }
 
+// Per-side effects (hazards, screens, Tailwind) from a side's `effects` map
+// into the shape @smogon/calc expects on Field.attackerSide/defenderSide.
+function sideEffectsToField(eff = {}) {
+  return {
+    isSR: !!eff['Stealth Rock'],
+    spikes: eff['Spikes'] ?? 0,
+    isReflect: !!eff['Reflect'],
+    isLightScreen: !!eff['Light Screen'],
+    isAuroraVeil: !!eff['Aurora Veil'],
+    isTailwind: !!eff['Tailwind'],
+  };
+}
+
+// Compact signature of everything in a Field that affects damage, for cache
+// keys (weather, terrain, and both sides' hazards/screens).
+export function fieldSig(field) {
+  if (!field) return '';
+  const side = (s) =>
+    s
+      ? `${s.isSR ? 'R' : ''}${s.spikes ?? 0}${s.isReflect ? 'r' : ''}${s.isLightScreen ? 'L' : ''}${s.isAuroraVeil ? 'A' : ''}${s.isTailwind ? 'T' : ''}`
+      : '';
+  return `${field.weather ?? ''}|${field.terrain ?? ''}|${side(field.attackerSide)}|${side(field.defenderSide)}`;
+}
+
 export function buildField(state) {
   const opts = {};
   if (state?.field?.weather) opts.weather = state.field.weather;
   if (state?.field?.terrain) opts.terrain = state.field.terrain;
+  // The calc's Field carries per-side effects: the attacker's screens don't
+  // help it attack, they protect IT when it defends. Canonical orientation is
+  // p1 attacks p2 (attackerSide = p1, defenderSide = p2); damagePercent flips
+  // it for the other direction.
+  opts.attackerSide = sideEffectsToField(state?.sides?.p1?.effects);
+  opts.defenderSide = sideEffectsToField(state?.sides?.p2?.effects);
   return new Field(opts);
+}
+
+// The calc's screens/hazards apply to whichever side is DEFENDING. buildField
+// orients the field as p1-attacks-p2, so a p2-attacks-p1 calculation needs the
+// sides swapped. Unknown sides keep the canonical orientation (matches the
+// pre-hazard behavior, where the field had no side info at all).
+export function directedField(field, atkSideId, defSideId) {
+  if (!field || !field.attackerSide || !field.defenderSide) return field;
+  if (atkSideId === 'p2' && defSideId === 'p1') {
+    return new Field({
+      weather: field.weather,
+      terrain: field.terrain,
+      attackerSide: field.defenderSide,
+      defenderSide: field.attackerSide,
+    });
+  }
+  return field;
 }
 
 // Expected damage of moveName from atkMon against defMon, as a percentage of
@@ -125,7 +172,9 @@ export function damagePercent(gen, atkMon, defMon, moveName, field, opts = {}) {
   }
   let result;
   try {
-    result = calculate(gen, attacker, defender, move, field);
+    // Screens (Reflect/Light Screen/Aurora Veil) protect the DEFENDER's side:
+    // point the field at the actual attacking/defending sides for this call.
+    result = calculate(gen, attacker, defender, move, directedField(field, atkMon.side, defMon.side));
   } catch {
     return null;
   }

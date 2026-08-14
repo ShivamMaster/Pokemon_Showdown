@@ -16,7 +16,7 @@
 import { MOVES, SPECIES } from '@smogon/calc';
 import learnsets from './data/learnsets-lite.js';
 import usage from './data/usage-lite.js';
-import { damagePercent, effectivenessOf } from './calc.js';
+import { damagePercent, effectivenessOf, fieldSig } from './calc.js';
 
 const toID = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 
@@ -91,8 +91,7 @@ export function worstThreat(theirMon, target, gen, field, calcOpts = {}) {
     stateSig(target),
     String(gen),
     calcOpts.statAssumption ?? 'max',
-    field?.weather ?? '',
-    field?.terrain ?? '',
+    fieldSig(field),
   ]);
   if (threatCache.has(cacheKey)) return threatCache.get(cacheKey);
 

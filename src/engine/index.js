@@ -22,6 +22,15 @@ export {
   utilityScore,
   activeMon,
   effLabel,
+  hazardDamageOnEntry,
+  entryHazardNotes,
+  hazardCount,
+  chipPerTurn,
+  moveConditionalSwitchProbs,
+  offensiveValue,
+  teamWincon,
+  sweepPotential,
+  endgameLocks,
 } from './recommend.js';
 export {
   potentialMoves,
