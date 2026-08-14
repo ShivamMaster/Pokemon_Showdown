@@ -14,7 +14,9 @@ let ocrId = 0;
 // OCR a canvas (or ImageData) to text. Resolves null on failure — callers
 // treat OCR as best-effort.
 export function ocrCanvas(canvas, timeoutMs = 20000) {
-  const ctx = canvas.getContext('2d');
+  // willReadFrequently: this canvas is read back via getImageData (the OCR
+  // pixel path) — the hint silences Chrome's repeated-readback warning.
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   const width = canvas.width;
   const height = canvas.height;
   let data;

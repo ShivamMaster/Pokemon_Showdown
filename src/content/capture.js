@@ -112,7 +112,10 @@ export function createCapture({ video = document.createElement('video'), canvas 
     (() =>
       typeof document !== 'undefined' ? document.getElementById('psa-overlay') : null);
 
-  const ctx = canvas.getContext('2d');
+  // willReadFrequently: the frame canvas is read back with getImageData every
+  // tick (blockHashes) — without this hint Chrome warns about repeated
+  // readbacks and may keep the canvas on the GPU (slower copies).
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   canvas.width = FRAME_W;
   canvas.height = FRAME_H;
 
@@ -196,7 +199,8 @@ export function createCapture({ video = document.createElement('video'), canvas 
     const out = document.createElement('canvas');
     out.width = Math.max(1, Math.round(sw * scale));
     out.height = Math.max(1, Math.round(sh * scale));
-    const octx = out.getContext('2d');
+    // The returned crop is later read back with getImageData by the OCR path.
+    const octx = out.getContext('2d', { willReadFrequently: true });
     try {
       octx.drawImage(video, sx, sy, sw, sh, 0, 0, out.width, out.height);
     } catch {

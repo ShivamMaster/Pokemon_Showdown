@@ -265,6 +265,12 @@ play.pokemonshowdown.com and the panel appears top-right. Use the toolbar
 icon (⚡) for the quick panel toggle and the options link; the options page
 manages profiles and settings.
 
+**After every code change:** hit the ↻ reload button in `chrome://extensions`
+**and then refresh your open battle tab.** The old tab keeps running the
+pre-reload scripts until refreshed — if you see `Extension context invalidated`
+in the console after reloading, that's exactly this (the stale script is now
+handled silently), and refreshing the tab clears it.
+
 ### Verify it (E2E)
 
 ```bash
