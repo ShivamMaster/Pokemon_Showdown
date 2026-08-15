@@ -121,6 +121,16 @@ test('renderOptionsHtml: empty state when no profiles exist', () => {
   assert.ok(!html.includes('psa-clear-all'));
 });
 
+test('renderOptionsHtml: export button is present and disabled without profiles', () => {
+  const withProfiles = renderOptionsHtml(profiles, {});
+  assert.ok(withProfiles.includes('id="psa-export-profiles"'));
+  assert.ok(!/id="psa-export-profiles" disabled/.test(withProfiles), 'enabled once profiles exist');
+  assert.match(withProfiles, /exports\/.*gitignored/);
+
+  const empty = renderOptionsHtml({}, {});
+  assert.match(empty, /id="psa-export-profiles" disabled/);
+});
+
 test('renderOptionsHtml: opponent names are HTML-escaped', () => {
   const evil = profileOf('<img src=x onerror=alert(1)>', 1, 1, 'Great Tusk', 0, 0);
   const html = renderOptionsHtml({ evil }, {});

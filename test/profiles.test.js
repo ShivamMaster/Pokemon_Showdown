@@ -14,6 +14,7 @@ import {
   renameProfile,
   addProfileAlias,
   removeProfileAlias,
+  exportProfilesText,
 } from '../src/profiles/index.js';
 import { loadProfiles, saveProfiles } from '../src/profiles/store.js';
 import { parseLog } from '../src/reader/reader.js';
@@ -90,6 +91,69 @@ test('summarizeBattle: real fixture yields opponent, result, leads, and revealed
   assert.equal(s.sets['Glimmora'].ability, 'Toxic Debris');
   assert.equal(s.sets['Dragonite'].item, 'Loaded Dice');
   assert.deepEqual(s.sets['Dragonite'].moves, ['Encore', 'Scale Shot']);
+});
+
+test('summarizeBattle: records the random-battle flag and a per-turn move log', () => {
+  const state = parseLog(realLog);
+  const s = summarizeBattle(state, 'p1');
+  // The fixture is an OU ladder battle.
+  assert.equal(s.random, false);
+
+  // The log covers both sides in turn order: our side is 'you', theirs 'them'.
+  assert.ok(Array.isArray(s.log) && s.log.length > 10, `expected a real log, got ${s.log?.length}`);
+  assert.ok(s.log.some((l) => l.startsWith('T1 you ') && l.includes('used ')), 'our first turn move should be logged');
+  assert.ok(s.log.some((l) => l.startsWith('T1 them ') && l.includes('used ')), 'their first turn move should be logged');
+  assert.ok(s.log.some((l) => l.includes('fainted')), 'KOs should be logged');
+  assert.ok(s.log.some((l) => l.includes('sent in')), 'switches should be logged');
+
+  // A random-battle tier sets the flag.
+  const randomState = makeState({ winner: 'BaddyGames', actions: [action({ type: 'move', move: 'Earthquake' })] });
+  randomState.format = '[Gen 9] Random Battle';
+  assert.equal(summarizeBattle(randomState, 'p1').random, true);
+});
+
+test('updateProfile: keeps the battle log in the stored history', () => {
+  const s = summarizeBattle(parseLog(realLog), 'p1');
+  const p = updateProfile(null, s);
+  assert.equal(p.battles.length, 1);
+  assert.deepEqual(p.battles[0].log, s.log);
+  assert.equal(p.battles[0].random, false);
+});
+
+// ---------------------------------------------------------------------------
+// txt backup export
+// ---------------------------------------------------------------------------
+
+test('exportProfilesText: renders readable profiles + battle logs + restorable JSON', () => {
+  const s = summarizeBattle(parseLog(realLog), 'p1');
+  const p = updateProfile(null, s);
+  const txt = exportProfilesText({ vkhss: p });
+
+  // Readable header and profile block.
+  assert.match(txt, /SHOWDOWN BATTLE ASSISTANT — PROFILE BACKUP/);
+  assert.match(txt, /Profile: vkhss/);
+  assert.match(txt, /Record: 1-0/);
+  assert.match(txt, /Common leads: Great Tusk/);
+  assert.match(txt, /Revealed sets:.*Dragonite/);
+
+  // The per-battle log shows up with moves and KOs.
+  assert.match(txt, /Battle 1 —/);
+  assert.match(txt, /T1 you .* used /);
+  assert.match(txt, /fainted/);
+
+  // The RAW JSON payload is present and round-trips back to the same store.
+  const rawIdx = txt.indexOf('RAW JSON');
+  assert.ok(rawIdx >= 0);
+  const payload = txt.slice(txt.indexOf('{', rawIdx));
+  const parsed = JSON.parse(payload);
+  assert.deepEqual(parsed, { vkhss: p });
+});
+
+test('exportProfilesText: empty store says so and still exports a valid JSON payload', () => {
+  const txt = exportProfilesText({});
+  assert.match(txt, /No profiles yet/);
+  const payload = txt.slice(txt.indexOf('{', txt.indexOf('RAW JSON')));
+  assert.deepEqual(JSON.parse(payload), {});
 });
 
 // ---------------------------------------------------------------------------

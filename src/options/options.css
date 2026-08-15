@@ -218,3 +218,43 @@ body {
   font-size: 13px;
   padding: 8px 0;
 }
+
+.psa-export-row {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.psa-export-row button {
+  background: #12384a;
+  border: 1px solid #2e7ea0;
+  color: #bfe9ff;
+  border-radius: 6px;
+  padding: 7px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.psa-export-row button:hover:not(:disabled) {
+  background: #17495f;
+}
+
+.psa-export-row button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.psa-export-row .psa-hint {
+  margin: 0;
+}
+
+.psa-export-row code {
+  background: #1c2129;
+  border: 1px solid #2e3340;
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 11.5px;
+}

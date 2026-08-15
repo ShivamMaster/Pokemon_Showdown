@@ -16,6 +16,7 @@ import { BattleReader } from '../reader/index.js';
 import { buildPanelModel, renderPanel } from '../ui/panel.js';
 import { recommend, applyObservations } from '../engine/index.js';
 import { topPotentialMoves } from '../engine/movepool.js';
+import { setBattleFormat, isRandomBattle } from '../engine/randoms.js';
 import { createCapture } from './capture.js';
 import {
   summarizeBattle,
@@ -135,6 +136,7 @@ function render(force = false) {
     ourSideId,
     recommendation,
     profile: profileForDisplay(currentProfile),
+    random: isRandomBattle(),
     watching: { count: seenCount, last: lastReadSpecies, ocrCount },
     capture: capture.getStats(),
     getPotentialMoves: (species) => topPotentialMoves(species, 3, state.gen ?? 9),
@@ -173,6 +175,7 @@ function tick() {
       reader.reset();
       linesSeen = 0;
       battleEnded = false;
+      setBattleFormat(null, null);
       loadSettings().then((s) => {
         settings = s;
         applyPanelVisibility();
@@ -203,6 +206,9 @@ function tick() {
     } else if (!mounted) {
       render(); // mount the panel up front with the waiting state
     }
+    // Random battles change the hidden-move pool and default levels — keep
+    // the engine's format in sync with this battle (|tier| line + room id).
+    setBattleFormat(reader.state.format, battleId);
     refreshOpponent();
     if (reader.state.winner && !battleEnded) {
       battleEnded = true;

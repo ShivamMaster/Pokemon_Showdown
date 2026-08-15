@@ -344,9 +344,21 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
       // much that scares us depends on the mode: ahead, never risk the lead;
       // behind, the sweep is the comeback, so the risk is acceptable.
       const setupRisk = (risk ?? RISK_MODES.normal).setupRiskMult;
-      if (incoming >= ourHp) {
+      // The KO is already on the table AND we're too low to afford the setup
+      // turn: setting up would just hand them the free hit. Just take the KO.
+      const finish = bestDamageMove(attacker, theirTarget, gen, field, calcOpts);
+      const targetHp = theirTarget?.hpPercent ?? 100;
+      if (finish && finish.max >= targetHp && ourHp < 45) {
+        value *= 0.15;
+        note = `setup: ${finish.move} already finishes ${theirTarget?.species} — just take the KO`;
+      } else if (incoming >= ourHp) {
         value *= setupRisk;
         note = `setup: risky — their ${theirTarget?.species} can KO you (~${round1(incoming)}%) before the boost pays off`;
+      } else if (ourHp < 45 && incoming * 2 >= ourHp) {
+        // They 2HKO us while we're low: the boost needs a second turn to pay
+        // off, and we don't have one. Same risk treatment as the 1HKO case.
+        value *= setupRisk;
+        note = `setup: risky — at ${round1(ourHp)}% HP their ${theirTarget?.species} finishes you (~${round1(incoming)}%/turn) before the boost pays off`;
       } else if (incoming >= 40) {
         value *= 0.7;
         note = `setup: boosted ${sweep.move} clears ${sweep.oneHko ? `${sweep.oneHko} and 2HKOs ${sweep.twoHko}` : sweep.twoHko ? `2HKOs ${sweep.twoHko}` : 'nothing'} of their team — but you take ~${round1(incoming)}% setting up`;
@@ -516,6 +528,19 @@ export function incomingPercent(theirActive, target, gen, field, calcOpts = {}) 
   return { pct: max, move };
 }
 
+// Best damaging move `attacker` has against `target` (by mean damage), with
+// its roll range — used to spot when a KO is already on the table (setting
+// up would waste the turn) and when a switch-in is a KO threat.
+export function bestDamageMove(attacker, target, gen, field, calcOpts) {
+  let best = null;
+  for (const moveName of attacker?.moves ?? []) {
+    const d = damagePercent(gen, attacker, target, moveName, field, calcOpts);
+    if (!d || d.category === 'Status' || d.max <= 0) continue;
+    if (!best || d.mean > best.mean) best = d;
+  }
+  return best;
+}
+
 // Damage % their active threatens `target` with, counting the worst hidden
 // move as well as revealed ones. Potential moves are a possibility, not a
 // certainty, so they're discounted (and only counted when genuinely
@@ -572,10 +597,9 @@ export function matchupDamage(gen, ourMon, theirMon, field, calcOpts = {}) {
   };
 }
 
-export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, calcOpts = {}, speedCtx = null, ourSide = null) {
+export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, calcOpts = {}, speedCtx = null, ourSide = null, risk = null) {
   const now = incomingPercent(theirActive, ourActive, gen, field, calcOpts);
   const cand = incomingPercent(theirActive, candidate, gen, field, calcOpts);
-  const candOff = ownBestDamage(candidate, theirActive, gen, field, calcOpts);
   // Both sides of the comparison use the FULL threat — revealed moves plus
   // the worst discounted hidden move. Staying risks what they *could* have;
   // so does switching in, and a candidate that a hidden move mauls is exactly
@@ -583,19 +607,43 @@ export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, ca
   const effectiveNow = effectiveIncoming(theirActive, ourActive, gen, field, calcOpts);
   const candEff = effectiveIncoming(theirActive, candidate, gen, field, calcOpts);
   const nowPot = worstThreat(theirActive, ourActive, gen, field, calcOpts);
+  // Offense is capped at the target's remaining HP (overkill gets no credit)
+  // and weighed against the hits the candidate will eat — a switch-in that
+  // threatens a KO on their active is an offensive play, not just a wall. The
+  // KO reward is mode-aware (safe only trusts a guaranteed roll, aggressive
+  // swings for the risky one), so a fragile-but-deadly pick becomes viable
+  // exactly when the mode says to take that risk.
+  const off = bestDamageMove(candidate, theirActive, gen, field, calcOpts);
+  const candOff = Math.min(off?.mean ?? 0, theirActive?.hpPercent ?? 100);
+  const targetHp = theirActive?.hpPercent ?? 100;
+  const candKo = !!off && off.max >= targetHp;
+  const candKoGuaranteed = !!off && off.min >= targetHp;
+  const r = risk ?? RISK_MODES.normal;
+  const koReward = candKo ? r.koSwitch(candKoGuaranteed) : 0;
   // Entry hazards on OUR side hit the incoming mon before it acts — charge
   // them into the comparison, and they can flip an otherwise-good send-in.
   const hazardDmg = hazardDamageOnEntry(candidate, ourSide, gen);
-  let net = (effectiveNow - candEff) + candOff * 0.15 - hazardDmg;
+  // A revealed move is certain; a hidden one is speculative (discounted 0.6×
+  // in effectiveIncoming). A candidate weak to something they've already
+  // SHOWN pays an extra penalty so certainty outweighs speculation — this is
+  // what stops the engine sending in a mon their known coverage wrecks.
+  const revealedPenalty = cand.pct >= 40 ? cand.pct * 0.3 : 0;
+  let net = (effectiveNow - candEff) + candOff * 0.6 + koReward - hazardDmg - revealedPenalty;
   if (net <= 0) return null;
   const theirMove = now.move ?? cand.move ?? 'their moves';
   let note =
     `Switch to ${candidate.species}: takes ~${round1(cand.pct)}% from ${theirMove} ` +
     `(vs ~${round1(effectiveNow)}% for ${ourActive.species})` +
     (hazardDmg > 0 ? `, plus ~${round1(hazardDmg)}% to hazards on entry` : '') +
-    (candOff ? `, hits back for ~${round1(candOff)}%` : '');
+    (candOff ? `, hits back for ~${round1(candOff)}%` : '') +
+    (candKo ? (candKoGuaranteed ? ' — guaranteed KO' : ' — can KO') : '');
   const entryNotes = entryHazardNotes(candidate, ourSide, gen);
   if (entryNotes) note += `; ${entryNotes}`;
+  // When the revealed threat to the CANDIDATE isn't the same move already
+  // named in the lead-in, call it out — it's the certain hit, not a guess.
+  if (revealedPenalty > 0 && cand.move && cand.move !== theirMove) {
+    note += `; their revealed ${cand.move} hits it for ~${round1(cand.pct)}%`;
+  }
   if (nowPot && nowPot.pct > now.pct) {
     note += `; their ${theirActive?.species} could hit ${ourActive.species} with ${nowPot.move} (~${round1(nowPot.pct)}%)`;
   }
@@ -635,17 +683,24 @@ export function bestSwitchIn(ourTeam, theirActive, gen, field, profile = null, c
   let bestScore = -Infinity;
   for (const candidate of ourTeam) {
     const cand = incomingPercent(theirActive, candidate, gen, field, calcOpts);
-    const candOff = ownBestDamage(candidate, theirActive, gen, field, calcOpts);
-    // Incoming damage counts revealed moves plus the discounted worst hidden
-    // move — at battle start nothing is revealed, and this is what stops the
-    // engine from sending in a mon their active could wreck. Damage and
-    // offense trade one-for-one: a candidate that takes much more than it
-    // deals is a bad send-in, and a 4x-weak pick loses to a bulky one unless
-    // its offense clearly outweighs the hits it will eat.
+    // Offense capped at the target's remaining HP (overkill gets no credit),
+    // with a bonus when the send-in is a KO threat. Incoming damage counts
+    // revealed moves plus the discounted worst hidden move — at battle start
+    // nothing is revealed, and this is what stops the engine from sending in
+    // a mon their active could wreck. A candidate weak to a move they've
+    // already SHOWN pays the same certainty penalty as the optional switch.
+    const off = bestDamageMove(candidate, theirActive, gen, field, calcOpts);
+    const candOff = Math.min(off?.mean ?? 0, theirActive?.hpPercent ?? 100);
+    const targetHp = theirActive?.hpPercent ?? 100;
+    const candKo = !!off && off.max >= targetHp;
+    const candKoGuaranteed = !!off && off.min >= targetHp;
     const effIn = effectiveIncoming(theirActive, candidate, gen, field, calcOpts);
     // Entry hazards on our side hit every send-in before it acts.
     const hazardDmg = hazardDamageOnEntry(candidate, ourSide, gen);
-    const score = candOff - effIn - hazardDmg;
+    const revealedPenalty = cand.pct >= 40 ? cand.pct * 0.3 : 0;
+    // A forced send-in has no move this turn, so the KO is the whole play —
+    // a candidate that can finish their active gets the balanced-mode reward.
+    const score = candOff + (candKo ? 13 : 0) - effIn - hazardDmg - revealedPenalty;
     if (score > bestScore) {
       bestScore = score;
       // Name the move behind the incoming number: the revealed best, or the
@@ -663,7 +718,8 @@ export function bestSwitchIn(ourTeam, theirActive, gen, field, profile = null, c
         net: round1(score),
         note: `Send in ${candidate.species}: takes ~${round1(effIn)}% from ${threatName}` +
           `${hazardDmg > 0 ? `, plus ~${round1(hazardDmg)}% to hazards on entry` : ''}` +
-          `${candOff ? `, hits back for ~${round1(candOff)}%` : ''}`,
+          `${candOff ? `, hits back for ~${round1(candOff)}%` : ''}` +
+          `${candKo ? (candKoGuaranteed ? ' — guaranteed KO' : ' — can KO') : ''}`,
       };
     }
   }
@@ -707,6 +763,12 @@ export const RISK_MODES = {
     switchThreshold: 8,
     threatenedAt: 40,
     pivotGate: 3,
+    // A switch-in that KOs their active is an offensive play, not a wall —
+    // how much we value it depends on the mode. Safe: only a GUARANTEED KO
+    // is worth risking the switch (a fragile roll could hand the lead back);
+    // normal: a KO is a KO; aggressive: the swing that wins if it lands is
+    // the comeback, prized above even the sure thing.
+    koSwitch: (guaranteed) => (guaranteed ? 16 : 4),
   },
   normal: {
     label: 'balanced play',
@@ -718,6 +780,7 @@ export const RISK_MODES = {
     switchThreshold: 12,
     threatenedAt: 45,
     pivotGate: 5,
+    koSwitch: () => 13,
   },
   aggressive: {
     label: 'playing aggressive',
@@ -729,6 +792,9 @@ export const RISK_MODES = {
     switchThreshold: 16,
     threatenedAt: 55,
     pivotGate: 8,
+    // The swing that wins if it lands is the comeback — worth more than the
+    // sure thing, which is just a KO like any other.
+    koSwitch: (guaranteed) => (guaranteed ? 18 : 22),
   },
 };
 
@@ -1041,7 +1107,7 @@ export function recommend(state, opts = {}) {
   if (!justBroughtIn) {
     switchEvals = bench
       .filter((m) => !recentlyLeft(m))
-      .map((m) => evaluateSwitch(ourActive, m, theirTarget, gen, field, calcOpts, speedCtx, ourSide))
+      .map((m) => evaluateSwitch(ourActive, m, theirTarget, gen, field, calcOpts, speedCtx, ourSide, risk))
       .filter(Boolean)
       .sort((a, b) => b.net - a.net);
   } else {
@@ -1060,10 +1126,14 @@ export function recommend(state, opts = {}) {
   // depends on the mode: ahead we preserve the lead more eagerly (lower bar),
   // behind we avoid burning tempo on marginal switches (higher bar).
   const threatened = (bestSwitch?.nowIn ?? 0) >= risk.threatenedAt;
+  // A status-wall best move (Thunder Wave, Toxic, …) is the setup for the
+  // switch, not a reason to switch early — those route through the dedicated
+  // pivot branch below so the advice reads "status this turn, then switch".
+  const statusPivotMove = bestMove?.kind === 'status' && STATUS_MOVES.has(bestMove.move);
   // Recommend a switch when it clearly saves HP and our options are weak, we're
   // in danger, the switch is clearly better than anything we can do, or their
   // active is threatening our current mon hard.
-  if (bestSwitch && switchValue > risk.switchThreshold && (moveIsWeak || inDanger || switchValue > 20 || threatened)) {
+  if (bestSwitch && !statusPivotMove && switchValue > risk.switchThreshold && (moveIsWeak || inDanger || switchValue > 20 || threatened)) {
     switchTo = { ident: bestSwitch.ident, species: bestSwitch.species, score: switchValue, note: bestSwitch.note };
   }
   if (!bestMove && bestSwitch) {

@@ -12,6 +12,7 @@ import { damagePercent, buildField } from '../src/engine/calc.js';
 import {
   recommend,
   evaluateMove,
+  evaluateSwitch,
   predictStayProb,
   predictSwitchProbs,
   utilityScore,
@@ -892,6 +893,41 @@ test('recommend: setup is recommended when the sweep is real and the active is w
   assert.ok(line && line.includes('1HKOs'), `setup reasoning should quantify the sweep, got: ${line}`);
 });
 
+test('recommend: at low HP with the KO already on the table, take the KO instead of setting up', () => {
+  // Garchomp @20% vs Heatran @30%: Earthquake is 4x and guaranteed — Swords
+  // Dance would waste the turn and hand them the free hit. (Healthy, the same
+  // setup can be the sweep — that's the test above; this is the low-HP case.)
+  const state = makeState({
+    ourActive: { species: 'Garchomp', hpPercent: 20, moves: ['Swords Dance', 'Earthquake'] },
+    theirActive: { species: 'Heatran', hpPercent: 30, moves: ['Lava Plume'] },
+  });
+  const rec = recommend(state);
+  assert.equal(rec.bestMove.move, 'Earthquake', 'finish the low target instead of boosting');
+  assert.ok(rec.bestMove.note.includes('guaranteed KO'), `got: ${rec.bestMove.note}`);
+  const atk = state.sides.p1.pokemon[0];
+  const tgt = state.sides.p2.pokemon[0];
+  const sd = evaluateMove(atk, 'Swords Dance', tgt, [tgt], 1, {}, 9, null);
+  assert.ok(sd.note.includes('just take the KO'), `setup should say to take the KO, got: ${sd.note}`);
+});
+
+test('recommend: setup at low HP is risky even when the KO is not available (they 2HKO us)', () => {
+  // Garchomp @30% vs Blissey: Seismic Toss chips ~24%/turn, so they 2HKO us
+  // and the boost needs a second turn we don't have — setup is deflated as
+  // risky, not recommended. (At 20% they'd 1HKO us, which the one-shot branch
+  // already covers.)
+  const state = makeState({
+    ourActive: { species: 'Garchomp', hpPercent: 30, moves: ['Swords Dance', 'Earthquake'] },
+    theirActive: { species: 'Blissey', hpPercent: 100, moves: ['Seismic Toss'] },
+  });
+  const rec = recommend(state);
+  assert.equal(rec.bestMove.move, 'Earthquake', 'attack — we do not have a free turn to boost');
+  const atk = state.sides.p1.pokemon[0];
+  const tgt = state.sides.p2.pokemon[0];
+  const sd = evaluateMove(atk, 'Swords Dance', tgt, [tgt], 1, {}, 9, null);
+  assert.ok(sd.note.includes('risky'), `setup should be flagged risky at low HP, got: ${sd.note}`);
+  assert.ok(sd.note.includes('finishes you'), `the note should name the 2HKO problem, got: ${sd.note}`);
+});
+
 test('recommend: endgame locks and win-condition reads appear in reasoning', () => {
   const state = makeState({
     ourActive: { species: 'Rillaboom', hpPercent: 70, moves: ['Wood Hammer', 'Grassy Glide', 'Knock Off'] },
@@ -1036,19 +1072,72 @@ test('evaluateMove: risky setup is acceptable when aggressive, near-useless when
 });
 
 test('recommend: the switch bar depends on the mode (safe switches eagerly, aggressive stays)', () => {
-  // Scizor vs Dragonite with Toxapex on the bench: the switch nets ~15.7 —
-  // above safe's bar (8) and normal's (12), below aggressive's (16).
+  // Scizor vs Dragonite with Toxapex on the bench: the switch nets ~12.8 (the
+  // revealed Outrage + being outsped count against it) — above safe's bar (8)
+  // and normal's (12), below aggressive's (16).
   const state = makeState({
     ourActive: { species: 'Scizor', hpPercent: 100, moves: ['Bullet Punch', 'U-turn'] },
     ourBench: [{ species: 'Toxapex', hpPercent: 100, moves: ['Liquidation', 'Toxic'] }],
-    theirActive: { species: 'Dragonite', hpPercent: 100, moves: ['Outrage', 'Earthquake', 'Ice Spinner'] },
+    theirActive: { species: 'Dragonite', hpPercent: 100, moves: ['Outrage'] },
     theirBench: [{ species: 'Gliscor', hpPercent: 100, moves: ['Earthquake'] }],
   });
   const rec = (mode) => recommend(state, { riskMode: mode });
   const safe = rec('safe');
+  const normal = rec('normal');
   const aggressive = rec('aggressive');
   assert.equal(safe.switchTo?.species, 'Toxapex', 'safe plays to preserve HP and takes the switch');
+  assert.equal(normal.switchTo?.species, 'Toxapex', 'balanced play takes a decent switch too');
   assert.equal(aggressive.switchTo, null, 'aggressive avoids burning tempo on a marginal switch');
+});
+
+test('recommend: a switch-in that KOs their active with a super-effective move is suggested over a wall', () => {
+  // Snorlax is dying; Weavile outspeeds Garchomp and its Icicle Crash is a
+  // GUARANTEED 4x KO, so it wins over Skarmory's pure walling in every mode.
+  const state = makeState({
+    ourActive: { species: 'Snorlax', hpPercent: 30, moves: ['Body Slam'] },
+    ourBench: [
+      { species: 'Skarmory', moves: ['Iron Head'] },
+      { species: 'Weavile', moves: ['Icicle Crash'] },
+    ],
+    theirActive: { species: 'Garchomp', hpPercent: 100, moves: ['Earthquake'] },
+  });
+  const rec = recommend(state, { riskMode: 'normal' });
+  assert.equal(rec.switchTo?.species, 'Weavile', 'the guaranteed KO is the play, not the wall');
+  assert.ok(rec.switchTo.note.includes('guaranteed KO'), `got: ${rec.switchTo.note}`);
+});
+
+test('evaluateSwitch: the roll-KO reward is mode-aware (aggressive swings for it, safe does not)', () => {
+  // Tyranitar's Stone Edge vs a 85% Zapdos is a roll KO (76.6-90.6%) — the
+  // aggressive mode prizes the swing that wins if it lands; safe mode only
+  // trusts guaranteed rolls, so the same switch nets less for it.
+  const state = makeState({
+    ourActive: { species: 'Snorlax', hpPercent: 30, moves: ['Body Slam'] },
+    ourBench: [{ species: 'Tyranitar', moves: ['Stone Edge'] }],
+    theirActive: { species: 'Zapdos', hpPercent: 85, moves: ['Thunderbolt'] },
+  });
+  const snorlax = state.sides.p1.pokemon[0];
+  const ttar = state.sides.p1.pokemon[1];
+  const zapdos = state.sides.p2.pokemon[0];
+  const safe = evaluateSwitch(snorlax, ttar, zapdos, 9, null, {}, null, null, RISK_MODES.safe);
+  const aggressive = evaluateSwitch(snorlax, ttar, zapdos, 9, null, {}, null, null, RISK_MODES.aggressive);
+  assert.ok(safe && aggressive, 'the switch should be available to both modes');
+  assert.ok(aggressive.net > safe.net, `aggressive should value the roll KO more (${aggressive.net} vs ${safe.net})`);
+  assert.match(aggressive.note, /can KO/);
+});
+
+test('recommend: a candidate 4x-weak to a REVEALED move is passed over', () => {
+  // Zapdos has Thunderbolt revealed — Gyarados is 4x weak to it, so even with
+  // its Waterfall offense the engine must pick the safe Tyranitar instead.
+  const state = makeState({
+    ourActive: { species: 'Snorlax', hpPercent: 30, moves: ['Body Slam'] },
+    ourBench: [
+      { species: 'Gyarados', moves: ['Waterfall', 'Outrage'] },
+      { species: 'Tyranitar', moves: ['Stone Edge'] },
+    ],
+    theirActive: { species: 'Zapdos', hpPercent: 100, moves: ['Thunderbolt'] },
+  });
+  const rec = recommend(state);
+  assert.equal(rec.switchTo?.species, 'Tyranitar', 'the revealed 4x weakness rules Gyarados out');
 });
 
 test('recommend: forced riskMode overrides the board read', () => {

@@ -4,3 +4,6 @@ extension/dist/
 extension/icons/
 *.log
 .DS_Store
+
+# Local profile backups (download the txt export from the options page here)
+exports/

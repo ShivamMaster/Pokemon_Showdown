@@ -8,11 +8,15 @@
 import { readFileSync } from 'node:fs';
 import { parseLog } from '../src/reader/index.js';
 import { recommend, applyObservations } from '../src/engine/index.js';
+import { setBattleFormat } from '../src/engine/randoms.js';
 
 const file = process.argv[2] ?? 'test/fixtures/real-battle.log';
 const ourSideId = process.argv[3] ?? 'p1';
 
 const state = parseLog(readFileSync(file, 'utf8'));
+// Random battles change the movepool and default levels — tell the engine
+// which format this log is so the analysis matches it.
+setBattleFormat(state.format);
 applyObservations(state); // back-calculate EV investment from observed damage
 const rec = recommend(state, { ourSideId });
 

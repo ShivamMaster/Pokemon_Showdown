@@ -13,6 +13,7 @@ import {
   renameProfile,
   addProfileAlias,
   removeProfileAlias,
+  exportProfilesText,
 } from '../profiles/index.js';
 import { loadSettings, saveSettings, normalizeSettings } from '../settings.js';
 import { escapeHtml } from '../ui/panel.js';
@@ -94,9 +95,33 @@ export function renderOptionsHtml(profiles, settings) {
     <h2>Opponent profiles <span class="psa-count">${rows.length}</span></h2>
     <p class="psa-hint">Learned from finished battles against each player: leads, switching habits, and move usage. Give a profile your friend's name and add their alternate usernames — battles under any of them count toward the same profile.</p>
     <ul class="psa-rows">${rowsHtml}</ul>
+    <div class="psa-export-row">
+      <button type="button" id="psa-export-profiles" ${rows.length ? '' : 'disabled'}>Export profiles (.txt)</button>
+      <p class="psa-hint">Downloads a readable backup of every profile and its battle logs. Save it somewhere safe — the repo's <code>exports/</code> folder is gitignored for exactly this.</p>
+    </div>
     ${rows.length ? '<button class="psa-clear-all" type="button">Clear all profiles</button>' : ''}
   </section>
 </main>`;
+}
+
+// Download a text file, offering a save dialog so the user can place the
+// backup (e.g. into the repo's gitignored exports/ folder). Falls back to an
+// anchor click when the downloads API isn't available (tests, plain pages).
+export function downloadText(filename, text) {
+  const blob = new Blob([text], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const cleanup = () => setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  if (typeof chrome !== 'undefined' && chrome.downloads?.download) {
+    chrome.downloads.download({ url, filename, saveAs: true }, cleanup);
+  } else {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    cleanup();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +240,11 @@ export async function main() {
       profiles = {};
       await saveProfiles(profiles);
       render();
+    });
+
+    root.querySelector('#psa-export-profiles')?.addEventListener('click', () => {
+      const stamp = new Date().toISOString().slice(0, 10);
+      downloadText(`profiles-backup-${stamp}.txt`, exportProfilesText(profiles));
     });
   };
 

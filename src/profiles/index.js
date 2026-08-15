@@ -13,3 +13,4 @@ export {
   emptyProfile,
 } from './learn.js';
 export { loadProfiles, saveProfiles } from './store.js';
+export { exportProfilesText } from './export.js';

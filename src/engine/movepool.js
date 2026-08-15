@@ -17,15 +17,23 @@ import { MOVES, SPECIES } from '@smogon/calc';
 import learnsets from './data/learnsets-lite.js';
 import usage from './data/usage-lite.js';
 import { damagePercent, effectivenessOf, fieldSig } from './calc.js';
+import { isRandomBattle, randomsMoves } from './randoms.js';
 
 const toID = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 
 const moveMemo = new Map();
-// Every Gen 9-legal move the species can know (display names).
+// The moves the species can know (display names). In a Random Battle that's
+// the bounded template movepool — a random team can ONLY roll those moves, so
+// "could have" analysis is far tighter than the full Gen 9 learnset. Outside
+// randoms it's the full learnset as before. Memoized per species + format so
+// switching between a random and a ladder battle never mixes pools.
 export function potentialMoves(species) {
-  if (moveMemo.has(species)) return moveMemo.get(species);
-  const list = learnsets[toID(species)]?.split(',') ?? [];
-  moveMemo.set(species, list);
+  const key = species + (isRandomBattle() ? '|R' : '|L');
+  if (moveMemo.has(key)) return moveMemo.get(key);
+  const list = isRandomBattle()
+    ? randomsMoves(species)
+    : (learnsets[toID(species)]?.split(',') ?? []);
+  moveMemo.set(key, list);
   return list;
 }
 
@@ -48,6 +56,9 @@ function usageTable(species) {
 }
 
 export function usageWeight(species, moveName) {
+  // Smogon usage stats describe OU sets — in a Random Battle every move in the
+  // template pool is (roughly) equally likely, so usage says nothing.
+  if (isRandomBattle()) return null;
   const w = usageTable(species)[moveName];
   return w != null ? w : null;
 }
@@ -92,6 +103,9 @@ export function worstThreat(theirMon, target, gen, field, calcOpts = {}) {
     String(gen),
     calcOpts.statAssumption ?? 'max',
     fieldSig(field),
+    // The hidden-move pool differs by format (random template vs full
+    // learnset) — keep battle-to-battle cache flips honest.
+    isRandomBattle() ? 'R' : 'L',
   ]);
   if (threatCache.has(cacheKey)) return threatCache.get(cacheKey);
 
@@ -144,7 +158,9 @@ export function topPotentialMoves(species, n = 4, gen = 9) {
   const moves = potentialMoves(species);
   const moves9 = MOVES[String(gen)] ?? {};
   const table = usageTable(species);
-  const hasUsage = Object.keys(table).length > 0;
+  // In a Random Battle the pool is the template itself, so there is no usage
+  // ranking to apply — order by base power instead.
+  const hasUsage = !isRandomBattle() && Object.keys(table).length > 0;
   return moves
     .map((name) => ({
       name,

@@ -471,6 +471,20 @@
   line-height: 1.4;
 }
 
+.psa-random-note {
+  color: var(--psa-accent, #4fd1ff);
+  font-size: 10.5px;
+  line-height: 1.4;
+  border-top: 1px dashed var(--psa-border-soft);
+  padding-top: 4px;
+  margin-top: 2px;
+}
+
+.psa-random-note em {
+  font-style: normal;
+  color: var(--psa-text);
+}
+
 /* ------------------------------------------------------------------ */
 /* Side columns                                                        */
 /* ------------------------------------------------------------------ */

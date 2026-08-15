@@ -3,7 +3,7 @@
   "name": "Showdown Battle Assistant",
   "version": "1.0.0",
   "description": "Tracks your Pokémon Showdown battle and recommends moves. Built for practice and friend battles — using it on the ladder is cheating.",
-  "permissions": ["storage", "activeTab", "tabCapture", "offscreen"],
+  "permissions": ["storage", "activeTab", "tabCapture", "offscreen", "downloads"],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },

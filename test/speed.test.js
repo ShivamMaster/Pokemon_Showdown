@@ -527,8 +527,11 @@ test('speed: a switch-in that outspeeds their active is rewarded', () => {
 
   const now = incomingPercent(theirActive, ourActive, 9, field).pct;
   const cand = incomingPercent(theirActive, candidate, 9, field).pct;
+  // Offense is now weighted 0.6 (was 0.15) and capped at the target's HP —
+  // Ferrothorn is at full HP here and neither the KO bonus nor the revealed-
+  // move penalty apply (Gyro Ball hits Garchomp for well under 40%).
   const candOff = ownBestDamage(candidate, theirActive, 9, field);
-  const baseNet = (now - cand) + candOff * 0.15;
+  const baseNet = (now - cand) + Math.min(candOff, 100) * 0.6;
 
   const speedCtx = { state, ourSideId: 'p1' };
   const res = evaluateSwitch(ourActive, candidate, theirActive, 9, field, {}, speedCtx);

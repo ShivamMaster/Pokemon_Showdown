@@ -12,6 +12,7 @@
 //   - 'base' assumption: 0 EVs (raw base-stat damage) — available via opts.
 
 import { calculate, Pokemon, Move, Field, TYPE_CHART } from '@smogon/calc';
+import { isRandomBattle, randomsLevel } from './randoms.js';
 
 const STATS = ['hp', 'atk', 'def', 'spa', 'spd', 'spe'];
 
@@ -69,8 +70,12 @@ function baseIvs() {
 // this is how the engine simulates "what if we terastallize now" (the calc
 // treats a set teraType as the terastallized state).
 export function buildPokemon(gen, mon, evs = {}, teraType = null, useEstimates = true) {
+  // Randoms use per-species levels (79-88), not 100: an unrevealed mon in a
+  // random battle should be calc'd at its template level, not a level it can
+  // never actually be. Revealed levels (from the log's L79) always win.
+  const defaultLevel = isRandomBattle() ? (randomsLevel(mon?.species) ?? 100) : 100;
   const opts = {
-    level: mon?.level ?? 100,
+    level: mon?.level ?? defaultLevel,
     nature: 'Serious',
     evs: useEstimates ? { ...baseEvs(), ...evs, ...estimatedEvs(mon) } : { ...baseEvs(), ...evs },
     ivs: baseIvs(),

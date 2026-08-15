@@ -14,6 +14,7 @@ export {
   evaluateSwitch,
   incomingPercent,
   ownBestDamage,
+  bestDamageMove,
   matchupDamage,
   bestSwitchIn,
   predictStayProb,
@@ -43,3 +44,12 @@ export {
   worstThreat,
   teamThreats,
 } from './movepool.js';
+export {
+  setBattleFormat,
+  isRandomBattle,
+  randomsEntry,
+  randomsMoves,
+  randomsLevel,
+  randomsAbilities,
+  randomsTeraTypes,
+} from './randoms.js';

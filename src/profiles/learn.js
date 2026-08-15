@@ -75,6 +75,34 @@ function speciesOf(state, ident) {
   return null;
 }
 
+// A compact, human-readable event log for a finished battle — both sides'
+// moves, switches, KOs, and status changes, in turn order. This is what the
+// txt backup shows per match so the patterns (and how to punish them) are
+// visible after the fact.
+function battleLog(state, ourSideId) {
+  const theirSideId = ourSideId === 'p1' ? 'p2' : 'p1';
+  const who = (sideId) => (sideId === ourSideId ? 'you' : 'them');
+  const lines = [];
+  for (const a of state.actions ?? []) {
+    const name = speciesOf(state, a.ident) ?? a.species ?? a.ident;
+    const tag = a.turn != null ? `T${a.turn}` : 'T?';
+    if (a.type === 'move') {
+      lines.push(`${tag} ${who(a.side)} ${name} used ${a.move}`);
+    } else if (a.type === 'switch') {
+      lines.push(`${tag} ${who(a.side)} sent in ${a.species}`);
+    } else if (a.type === 'faint') {
+      lines.push(`${tag} ${who(a.side)} ${name} fainted`);
+    } else if (a.type === 'status' && a.status) {
+      lines.push(`${tag} ${who(a.side)} ${name} was ${STATUS_LABELS[a.status] ?? a.status}`);
+    } else if (a.type === 'curestatus' && !a.status) {
+      lines.push(`${tag} ${who(a.side)} ${name} was cured of its status`);
+    }
+  }
+  return lines;
+}
+
+const STATUS_LABELS = { brn: 'burned', par: 'paralyzed', psn: 'poisoned', tox: 'badly poisoned', slp: 'put to sleep', frz: 'frozen' };
+
 // One battle's learnable facts.
 export function summarizeBattle(state, ourSideId) {
   const theirSideId = ourSideId === 'p1' ? 'p2' : 'p1';
@@ -131,6 +159,10 @@ export function summarizeBattle(state, ourSideId) {
   return {
     opponent: theirSide.playerName,
     format: state.format,
+    // Random battles change what the summary means: the opponent's species,
+    // sets, and leads are random each match, so only the playstyle numbers
+    // (switching habits) carry over between battles.
+    random: /random/i.test(state.format ?? ''),
     turns: state.turn,
     date: Date.now(),
     result,
@@ -141,6 +173,7 @@ export function summarizeBattle(state, ourSideId) {
     switchIns: voluntarySwitchIns,
     movesUsed: Object.fromEntries(Object.entries(movesUsed).map(([sp, set]) => [sp, [...set]])),
     sets,
+    log: battleLog(state, ourSideId),
   };
 }
 

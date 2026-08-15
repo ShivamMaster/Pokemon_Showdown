@@ -371,6 +371,10 @@ export function buildPanelModel(state, opts = {}) {
     them: sideModel(theirSide, { showPotential: true }),
     recommendation: opts.recommendation ?? null,
     profile: opts.profile ?? null,
+    // Random battles make species-based learning meaningless (fresh random
+    // teams every match) — the panel notes that so the numbers aren't read
+    // as "they always lead with X".
+    random: !!opts.random,
     watching: { count: opts.watching?.count ?? 0, last: opts.watching?.last ?? null },
     ocrCount: opts.watching?.ocrCount ?? 0,
     capture: {
@@ -770,6 +774,9 @@ export function renderPanel(model) {
 </div>`;
 
   const fieldHtml = `<div class="psa-field">${escapeHtml(model.field)}</div>`;
+  const randomHtml = model.random
+    ? '<div class="psa-random-note">⚡ Random battle — teams are random each match, so the profile here reflects <em>playstyle</em> (switching habits), not species patterns.</div>'
+    : '';
   const body = `
   ${watchingHtml}
   ${recHtml}
@@ -777,6 +784,7 @@ export function renderPanel(model) {
   <div class="psa-context">
     ${profileHtml}
     ${fieldHtml}
+    ${randomHtml}
   </div>
   <section class="psa-section psa-teams-section">
     <div class="psa-section-title">Teams</div>

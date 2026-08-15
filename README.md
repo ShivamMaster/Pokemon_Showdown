@@ -49,6 +49,15 @@ best move, built in stages:
     or a Drizzle/Drought ability on their active or bench). The stat
     estimator snapshots the field per hit so learned EVs stay accurate under
     changing weather.
+13. **Random-battle awareness + profile backups** (done) — Random Battles
+    (the format you mostly play) are detected from the battle's tier/room,
+    and the engine switches modes: hidden moves come from each species'
+    official random template pool (5-10 moves, not the full learnset), Smogon
+    OU usage weights are neutralized, and unrevealed mons are calc'd at their
+    template level (79-88, not 100). Every finished battle records a readable
+    move log + a random-battle flag into the opponent's profile, and the
+    options page can export all profiles as a downloadable .txt backup
+    (save it in the repo's gitignored `exports/` folder).
 
 ## Stage 8: pixel OCR fallback
 
@@ -216,9 +225,15 @@ time, keyed by (lowercased) username and stored in `chrome.storage.local`
 - `learn.js` — `summarizeBattle(state, ourSideId)` extracts one battle's
   facts from the reader's action journal: both leads, voluntary switch-ins
   (forced switches — `|drag|`, pivot, or right after a faint — are excluded),
-  low-HP switch/faint counts, move usage per species, and revealed sets.
-  `updateProfile` merges a battle into the running profile (record, common
-  leads, switch-in and move-usage counts, set unions, last 20 battles).
+  low-HP switch/faint counts, move usage per species, revealed sets, a
+  `random` flag (Random Battle or not), and a **per-turn move log** (`T1 you
+  Raging Bolt used Dragon Pulse` / `T4 them Garchomp fainted`) — the "small
+  summary of what happened" saved after every match. `updateProfile` merges
+  a battle into the running profile (record, common leads, switch-in and
+  move-usage counts, set unions, last 20 battles).
+- `export.js` — `exportProfilesText(profiles)` renders the whole store as a
+  readable .txt backup: every opponent, their tendencies, each battle's log,
+  and a RAW JSON payload at the bottom for restoring later.
 - `store.js` — `loadProfiles`/`saveProfiles` over the unified storage driver.
 - Projections: `profileForEngine` produces the exact shape the engine's
   switch prediction consumes (`switchTendency.atLowHp` ratio and
@@ -259,8 +274,13 @@ page apply to open battles immediately.
 
 - **Options page** (`src/options/`) — toggle the panel, choose the damage
   engine's stat assumption (typical 252-EV builds vs base stats), pick the
-  risk mode (auto / safe / balanced / aggressive), and manage the learned
-  profiles (view, delete one, clear all).
+  risk mode (auto / safe / balanced / aggressive), manage the learned
+  profiles (view, delete one, clear all), and **Export profiles (.txt)** —
+  downloads a timestamped backup of every profile and battle log; save it
+  into the repo's `exports/` folder (gitignored) as a local backup.
+- **Random battles** — the format is detected automatically (tier line /
+  room id), so the panel adds a note that species patterns are noise and
+  only playstyle counts; see the engine section for how analysis changes.
 - **Popup** (`src/popup/`) — quick panel on/off, **Start / Stop watching
   screen** (real tab capture via `chrome.tabCapture` — requires the
   `tabCapture` permission, which the manifest declares), and a link to
@@ -472,7 +492,29 @@ captured from a real battle page and parses identically.
     unlocks — how many of their remaining mons a boosted best move 1HKOs /
     2HKOs — and only recommended when you can take their active's hit
     (setting up into something that KOs you is deflated hard and flagged
-    "risky").
+    "risky"). Two low-HP guards stop the "keep boosting" loop: if your best
+    damage move already finishes their active and you're below ~45% HP, the
+    engine says "just take the KO"; and if they 2HKO you at low HP (no free
+    turn for the boost), setup is flagged risky too.
+  - **Switch-ins play offense, not just defense** (`evaluateSwitch`): a
+    switch-in's damage is capped at their active's remaining HP (overkill
+    gets no credit), weighted 4× heavier than before, and a candidate that
+    can KO their active gets a mode-aware reward (safe only trusts a
+    *guaranteed* roll; aggressive swings for the risky one) — so a
+    fragile-but-deadly 4×-SE pick is suggested when it should be, instead of
+    always losing to a pure wall. And a candidate weak to a move they've
+    already **shown** pays an extra certainty penalty (revealed beats
+    speculation), so the engine never sends in a mon their known coverage
+    wrecks just because its hypothetical moves are scarier.
+  - **Random-battle mode** (`randoms.js` + `randoms-lite.js`): when the
+    battle is a Random Battle (detected from the tier/room), the engine
+    stops assuming a pre-made OU team — "could have" moves come from the
+    species' official random template pool (`randomsMoves`, 5-10 moves per
+    species instead of the full learnset), Smogon usage weights are
+    neutralized (random teams don't follow OU sets), and unrevealed mons are
+    calc'd at their template level (`randomsLevel`, e.g. Weavile 79, not
+    100). The panel notes that in randoms the profile's species patterns are
+    noise and only the playstyle numbers (switching habits) carry over.
   - **Endgame lock-in logic** (`endgameLocks`): once the battle is down to
     ≤4 mons, the engine enumerates the remaining 1v1s (best moves, remaining
     HP, speed order) and calls out the decided ones: "your Rillaboom beats
