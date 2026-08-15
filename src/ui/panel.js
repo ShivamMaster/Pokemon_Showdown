@@ -628,27 +628,33 @@ function renderMatchup(matchup) {
   // Full damage calc for the matchup, hidden until a Damage bar is clicked.
   const calcPanel = renderCalcPanel(matchup);
 
-  return `<div class="psa-matchup">
-  <div class="psa-match-head">
-    <span class="psa-match-name">${escapeHtml(matchup.ours.species)}</span>
-    <span class="psa-match-vs">vs</span>
-    <span class="psa-match-name">${escapeHtml(matchup.theirs.species)}</span>
-    <span class="psa-match-speed" title="Who acts first in this matchup">⚡ ${escapeHtml(matchup.speed)}</span>
+  return `<section class="psa-section">
+  <div class="psa-section-title">Matchup</div>
+  <div class="psa-matchup">
+    <div class="psa-match-head">
+      <span class="psa-match-name">${escapeHtml(matchup.ours.species)}</span>
+      <span class="psa-match-vs">vs</span>
+      <span class="psa-match-name">${escapeHtml(matchup.theirs.species)}</span>
+      <span class="psa-match-speed" title="Who acts first in this matchup">⚡ ${escapeHtml(matchup.speed)}</span>
+    </div>
+    <table class="psa-match-table" title="Green = the side that definitely wins this stat (ranges that don't overlap); neutral = too close to call">
+      <thead><tr class="psa-match-headrow"><th class="psa-match-th-label"></th><th>You</th><th>Them</th></tr></thead>
+      <tbody>
+        ${row('HP', hpText(matchup.ours), hpText(matchup.theirs), hpWin)}
+        ${row('Atk', statText(matchup.ours, 'A'), statText(matchup.theirs, 'A'), winnerOf(statOf(matchup.ours, 'A'), statOf(matchup.theirs, 'A')))}
+        ${row('Def', statText(matchup.ours, 'D'), statText(matchup.theirs, 'D'), winnerOf(statOf(matchup.ours, 'D'), statOf(matchup.theirs, 'D')))}
+        ${row('SpA', statText(matchup.ours, 'SA'), statText(matchup.theirs, 'SA'), winnerOf(statOf(matchup.ours, 'SA'), statOf(matchup.theirs, 'SA')))}
+        ${row('SpD', statText(matchup.ours, 'SD'), statText(matchup.theirs, 'SD'), winnerOf(statOf(matchup.ours, 'SD'), statOf(matchup.theirs, 'SD')))}
+        ${row('Spe', statText(matchup.ours, 'S'), statText(matchup.theirs, 'S'), winnerOf(statOf(matchup.ours, 'S'), statOf(matchup.theirs, 'S')), 'psa-match-row-spe')}
+        ${dmgRow}
+        ${row('Item', itemText(matchup.ours), itemText(matchup.theirs))}
+        ${row('Ability', matchup.ours.ability ?? '?', matchup.theirs.ability ?? '?')}
+        ${typeRow}
+      </tbody>
+    </table>
+    ${calcPanel}
   </div>
-  <table class="psa-match-table" title="Green = the side that definitely wins this stat (ranges that don't overlap); neutral = too close to call">
-    ${row('HP', hpText(matchup.ours), hpText(matchup.theirs), hpWin)}
-    ${row('Atk', statText(matchup.ours, 'A'), statText(matchup.theirs, 'A'), winnerOf(statOf(matchup.ours, 'A'), statOf(matchup.theirs, 'A')))}
-    ${row('Def', statText(matchup.ours, 'D'), statText(matchup.theirs, 'D'), winnerOf(statOf(matchup.ours, 'D'), statOf(matchup.theirs, 'D')))}
-    ${row('SpA', statText(matchup.ours, 'SA'), statText(matchup.theirs, 'SA'), winnerOf(statOf(matchup.ours, 'SA'), statOf(matchup.theirs, 'SA')))}
-    ${row('SpD', statText(matchup.ours, 'SD'), statText(matchup.theirs, 'SD'), winnerOf(statOf(matchup.ours, 'SD'), statOf(matchup.theirs, 'SD')))}
-    ${row('Spe', statText(matchup.ours, 'S'), statText(matchup.theirs, 'S'), winnerOf(statOf(matchup.ours, 'S'), statOf(matchup.theirs, 'S')), 'psa-match-row-spe')}
-    ${dmgRow}
-    ${row('Item', itemText(matchup.ours), itemText(matchup.theirs))}
-    ${row('Ability', matchup.ours.ability ?? '?', matchup.theirs.ability ?? '?')}
-    ${typeRow}
-  </table>
-  ${calcPanel}
-</div>`;
+</section>`;
 }
 
 // The expanded full damage calc: every revealed damaging move of each side
@@ -763,16 +769,22 @@ export function renderPanel(model) {
   </span>
 </div>`;
 
+  const fieldHtml = `<div class="psa-field">${escapeHtml(model.field)}</div>`;
   const body = `
   ${watchingHtml}
   ${recHtml}
   ${renderMatchup(model.matchup)}
-  ${profileHtml}
-  <div class="psa-field">${escapeHtml(model.field)}</div>
-  <div class="psa-columns">
-    ${renderSide(model.us, 'psa-side-us', 'You')}
-    ${renderSide(model.them, 'psa-side-them', 'Opponent')}
+  <div class="psa-context">
+    ${profileHtml}
+    ${fieldHtml}
   </div>
+  <section class="psa-section psa-teams-section">
+    <div class="psa-section-title">Teams</div>
+    <div class="psa-columns">
+      ${renderSide(model.us, 'psa-side-us', 'You')}
+      ${renderSide(model.them, 'psa-side-them', 'Opponent')}
+    </div>
+  </section>
   ${logHtml}`;
 
   return header(body);

@@ -1,22 +1,33 @@
 /* src/ui/styles.css — Battle Assistant panel */
 
+.psa-panel,
+.psa-panel * {
+  box-sizing: border-box;
+}
+
 .psa-panel {
-  --psa-bg: rgba(16, 18, 24, 0.94);
-  --psa-border: #3a3f4b;
+  --psa-bg: rgba(12, 14, 20, 0.95);
+  --psa-surface: #151a23;
+  --psa-surface-2: #1a202b;
+  --psa-surface-3: #1f2632;
+  --psa-border: #2a3242;
+  --psa-border-soft: #222935;
   --psa-text: #e8eaf0;
-  --psa-muted: #98a0ad;
-  --psa-accent: #4fc3f7;
-  --psa-danger: #ef5350;
-  --psa-warn: #ffca28;
-  --psa-ok: #66bb6a;
+  --psa-muted: #8d95a5;
+  --psa-faint: #667080;
+  --psa-accent: #56c7ff;
+  --psa-accent-dim: rgba(86, 199, 255, 0.14);
+  --psa-danger: #ff6b6b;
+  --psa-warn: #ffd54f;
+  --psa-ok: #69db7c;
   font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   background: var(--psa-bg);
   color: var(--psa-text);
   border: 1px solid var(--psa-border);
-  border-radius: 10px;
-  font-size: 13px;
+  border-radius: 12px;
+  font-size: 12.5px;
   line-height: 1.35;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(0, 0, 0, 0.25);
   min-width: 300px;
   max-width: 400px;
   overflow: hidden;
@@ -33,7 +44,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--psa-muted);
+  color: var(--psa-faint);
   font-size: 12px;
   line-height: 1;
   cursor: nwse-resize;
@@ -44,8 +55,8 @@
 }
 
 .psa-resize:hover {
-  color: var(--psa-text);
-  background: rgba(79, 195, 247, 0.18);
+  color: var(--psa-accent);
+  background: var(--psa-accent-dim);
 }
 
 .psa-panel.psa-collapsed .psa-resize {
@@ -67,7 +78,9 @@
   flex: 1 1 auto;
   min-height: 0;
   max-height: none;
-}  .psa-panel.psa-collapsed {
+}
+
+.psa-panel.psa-collapsed {
   height: auto !important; /* collapsed always hugs the header */
 }
 
@@ -100,13 +113,18 @@
   display: none;
 }
 
+/* ------------------------------------------------------------------ */
+/* Header                                                              */
+/* ------------------------------------------------------------------ */
+
 .psa-header {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  background: #22262f;
+  padding: 9px 12px;
+  background: linear-gradient(180deg, #1a2130, #131824);
   border-bottom: 1px solid var(--psa-border);
+  box-shadow: inset 0 -2px 0 -1px rgba(86, 199, 255, 0.25);
   cursor: grab; /* drag the panel by its header to move it */
 }
 
@@ -120,44 +138,52 @@
 }
 
 .psa-overlay.psa-dragging .psa-panel {
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.65);
 }
 
 .psa-title {
   font-weight: 700;
-  letter-spacing: 0.2px;
+  font-size: 12.5px;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
 }
 
 .psa-meta {
   color: var(--psa-muted);
-  font-size: 12px;
+  font-size: 11px;
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .psa-collapse,
 .psa-compact {
-  background: #2d323d;
+  background: #232a37;
   color: var(--psa-text);
-  border: 1px solid var(--psa-border);
+  border: 1px solid #303848;
   border-radius: 6px;
   width: 24px;
   height: 24px;
   cursor: pointer;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s ease, border-color 0.12s ease;
 }
 
 .psa-collapse:hover,
 .psa-compact:hover {
-  background: #3a4150;
+  background: #2d3646;
+  border-color: #3a4456;
 }
 
 .psa-panel.psa-compact .psa-compact {
-  background: rgba(79, 195, 247, 0.22);
-  border-color: var(--psa-accent);
+  background: var(--psa-accent-dim);
+  border-color: rgba(86, 199, 255, 0.45);
 }
 
 .psa-panel.psa-collapsed .psa-body {
@@ -165,37 +191,95 @@
 }
 
 .psa-body {
-  padding: 10px 12px 12px;
+  padding: 10px 12px 14px;
   max-height: 70vh;
   overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Slim scrollbars for the scrollable body + log. */
+.psa-body::-webkit-scrollbar,
+.psa-log ol::-webkit-scrollbar {
+  width: 8px;
+}
+
+.psa-body::-webkit-scrollbar-thumb,
+.psa-log ol::-webkit-scrollbar-thumb {
+  background: #2c3442;
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.psa-body::-webkit-scrollbar-thumb:hover,
+.psa-log ol::-webkit-scrollbar-thumb:hover {
+  background: #3a4456;
+  background-clip: content-box;
+}
+
+.psa-body::-webkit-scrollbar-track,
+.psa-log ol::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .psa-empty {
   color: var(--psa-muted);
-  padding: 12px 4px;
+  text-align: center;
+  padding: 26px 12px;
+  border: 1px dashed var(--psa-border);
+  border-radius: 10px;
+  font-size: 12px;
 }
 
-/* Screen-watching status */
+/* ------------------------------------------------------------------ */
+/* Section titles — organize the panel into labeled groups             */
+/* ------------------------------------------------------------------ */
+
+.psa-section {
+  margin-top: 10px;
+}
+
+.psa-section-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--psa-muted);
+  margin: 0 0 6px;
+}
+
+.psa-section-title::before {
+  content: '';
+  width: 3px;
+  height: 10px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--psa-accent), rgba(86, 199, 255, 0.25));
+}
+
+/* Screen-watching status — a slim status line, not a box. */
 .psa-watch {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   color: var(--psa-muted);
-  font-size: 11px;
-  background: #18202b;
-  border: 1px solid var(--psa-border);
-  border-radius: 6px;
-  padding: 4px 9px;
+  font-size: 10.5px;
+  background: var(--psa-surface);
+  border: 1px solid var(--psa-border-soft);
+  border-radius: 8px;
+  padding: 4px 10px;
   margin-bottom: 8px;
 }
 
 .psa-watch-live {
-  border-color: rgba(34, 197, 94, 0.55);
-  background: #14241c;
+  border-color: rgba(105, 219, 124, 0.4);
+  background: rgba(105, 219, 124, 0.06);
 }
 
 .psa-watch-live .psa-watch-icon {
-  color: #22c55e;
+  color: #69db7c;
   animation: psa-pulse 1.4s ease-in-out infinite;
 }
 
@@ -210,7 +294,15 @@
 }
 
 .psa-watch-icon {
-  font-size: 12px;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 10px;
+  flex-shrink: 0;
 }
 
 .psa-watch-text {
@@ -224,120 +316,165 @@
 
 @keyframes psa-flash {
   0% {
-    box-shadow: 0 0 0 2px var(--psa-accent), 0 0 14px rgba(89, 205, 255, 0.55);
+    box-shadow: 0 0 0 2px var(--psa-accent), 0 0 14px rgba(86, 199, 255, 0.55);
   }
   100% {
     box-shadow: none;
   }
 }
 
-.psa-tag-observed {
-  background: #3b3350;
-  color: #c9b8ff;
-}
+/* ------------------------------------------------------------------ */
+/* Recommendation — the hero of the panel                              */
+/* ------------------------------------------------------------------ */
 
-/* Recommendations strip */
 .psa-rec {
-  background: #1c2029;
-  border: 1px solid var(--psa-border);
-  border-radius: 8px;
-  padding: 8px 10px;
+  position: relative;
+  background: linear-gradient(180deg, rgba(86, 199, 255, 0.09), rgba(86, 199, 255, 0.02)), var(--psa-surface);
+  border: 1px solid rgba(86, 199, 255, 0.22);
+  border-left: 3px solid var(--psa-accent);
+  border-radius: 10px;
+  padding: 10px 12px;
   margin-bottom: 8px;
 }
 
 /* Risk-mode badge: which line we're playing and by how much we're ahead/behind */
 .psa-rec-risk {
   display: inline-block;
-  margin-bottom: 6px;
-  padding: 2px 8px;
+  margin-bottom: 7px;
+  padding: 2px 9px;
   border-radius: 10px;
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
   border: 1px solid;
+  letter-spacing: 0.2px;
 }
 
 .psa-risk-safe {
-  background: rgba(94, 201, 98, 0.12);
-  border-color: rgba(94, 201, 98, 0.4);
+  background: rgba(105, 219, 124, 0.12);
+  border-color: rgba(105, 219, 124, 0.4);
   color: var(--psa-ok);
 }
 
 .psa-risk-aggressive {
   background: rgba(255, 107, 107, 0.12);
   border-color: rgba(255, 107, 107, 0.4);
-  color: #ff8a8a;
+  color: #ff9b9b;
 }
 
 .psa-rec-row {
   display: flex;
   justify-content: space-between;
+  align-items: baseline;
   gap: 8px;
+}
+
+.psa-rec-row + .psa-rec-row {
+  margin-top: 2px;
 }
 
 .psa-rec-label {
   color: var(--psa-muted);
+  font-size: 11px;
 }
 
 .psa-rec-value {
   color: var(--psa-accent);
   font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .psa-rec-conf {
   display: inline-block;
   margin-left: 6px;
-  padding: 1px 6px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.08);
+  padding: 1px 7px;
+  border-radius: 9px;
+  background: rgba(105, 219, 124, 0.12);
+  border: 1px solid rgba(105, 219, 124, 0.28);
   color: var(--psa-ok);
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 10.5px;
+  font-weight: 700;
   vertical-align: middle;
+  font-variant-numeric: tabular-nums;
 }
 
 .psa-rec-note {
   color: var(--psa-muted);
-  font-size: 12px;
-  margin-top: 4px;
+  font-size: 11.5px;
+  margin-top: 5px;
 }
 
 .psa-rec-note.psa-winner {
   color: var(--psa-ok);
+  font-weight: 600;
 }
 
 .psa-reasoning {
-  margin: 6px 0 0;
-  padding-left: 18px;
-  color: var(--psa-text);
-  font-size: 12px;
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: #c3cad6;
+  font-size: 11.5px;
 }
 
-/* Field conditions */
-.psa-field {
-  color: var(--psa-muted);
-  font-size: 12px;
-  margin-bottom: 8px;
+.psa-reasoning li {
+  position: relative;
+  padding-left: 13px;
+  line-height: 1.4;
 }
 
-/* Learned opponent profile */
+.psa-reasoning li::before {
+  content: '';
+  position: absolute;
+  left: 1px;
+  top: 6px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(86, 199, 255, 0.5);
+}
+
+/* ------------------------------------------------------------------ */
+/* Field conditions + learned profile — one quiet context bar          */
+/* ------------------------------------------------------------------ */
+
+.psa-context {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--psa-surface);
+  border: 1px solid var(--psa-border-soft);
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin-bottom: 0;
+}
+
 .psa-profile {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 10px;
+  gap: 2px 12px;
   color: var(--psa-muted);
-  font-size: 11px;
-  background: #1a1e27;
-  border: 1px solid var(--psa-border);
-  border-radius: 6px;
-  padding: 5px 9px;
-  margin-bottom: 8px;
+  font-size: 10.5px;
 }
 
 .psa-profile strong {
   color: var(--psa-text);
+  font-weight: 600;
 }
 
-/* Side columns */
+.psa-field {
+  color: var(--psa-faint);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+/* ------------------------------------------------------------------ */
+/* Side columns                                                        */
+/* ------------------------------------------------------------------ */
+
 .psa-columns {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -345,24 +482,43 @@
 }
 
 .psa-side-title {
-  font-size: 12px;
-  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  font-weight: 700;
   color: var(--psa-muted);
   margin: 0 0 6px;
   text-transform: uppercase;
-  letter-spacing: 0.4px;
+  letter-spacing: 0.9px;
+}
+
+.psa-side-title::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--psa-accent);
+  box-shadow: 0 0 6px rgba(86, 199, 255, 0.7);
+}
+
+.psa-side-them .psa-side-title::before {
+  background: #7d8698;
+  box-shadow: none;
 }
 
 .psa-name {
   color: var(--psa-text);
   text-transform: none;
   letter-spacing: 0;
+  font-weight: 500;
 }
 
 .psa-sideeffects {
   color: var(--psa-warn);
-  font-size: 11px;
+  font-size: 10.5px;
   margin-top: 6px;
+  line-height: 1.4;
 }
 
 /* Pokémon slot grid — six boxes per side */
@@ -378,70 +534,86 @@
 
 .psa-slot-empty {
   border-style: dashed;
-  opacity: 0.7;
+  background: transparent;
+  opacity: 0.5;
 }
 
-/* Pokémon cards */
+/* ------------------------------------------------------------------ */
+/* Pokémon cards                                                       */
+/* ------------------------------------------------------------------ */
+
 .psa-card {
-  background: #20242e;
-  border: 1px solid #2e3340;
+  background: var(--psa-surface-2);
+  border: 1px solid var(--psa-border-soft);
   border-radius: 8px;
   padding: 7px 9px;
   margin-bottom: 6px;
-}
-
-.psa-potential {
-  font-size: 11px;
-  color: var(--psa-warn);
-  margin-top: 3px;
-  word-break: break-word;
+  min-width: 0;
 }
 
 .psa-card.psa-active {
-  border-color: var(--psa-accent);
-  box-shadow: 0 0 0 1px var(--psa-accent);
+  border-color: rgba(86, 199, 255, 0.55);
+  box-shadow: 0 0 0 1px rgba(86, 199, 255, 0.35), 0 2px 10px rgba(86, 199, 255, 0.08);
 }
 
 .psa-card.psa-fainted {
-  opacity: 0.45;
+  opacity: 0.4;
+  filter: grayscale(0.4);
 }
 
 .psa-card-head {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   flex-wrap: wrap;
+  margin-bottom: 4px;
 }
 
 .psa-species {
   font-weight: 700;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
 }
 
 .psa-tag {
-  font-size: 10px;
+  font-size: 8.5px;
+  font-weight: 600;
   border-radius: 4px;
-  padding: 0 5px;
+  padding: 1px 5px;
   text-transform: uppercase;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
 }
 
 .psa-tag-active {
-  background: rgba(79, 195, 247, 0.18);
+  background: var(--psa-accent-dim);
   color: var(--psa-accent);
-  border: 1px solid rgba(79, 195, 247, 0.5);
+  border: 1px solid rgba(86, 199, 255, 0.45);
 }
 
 .psa-tag-fainted {
-  background: rgba(239, 83, 80, 0.15);
+  background: rgba(255, 107, 107, 0.14);
   color: var(--psa-danger);
-  border: 1px solid rgba(239, 83, 80, 0.5);
+  border: 1px solid rgba(255, 107, 107, 0.4);
+}
+
+.psa-tag-observed {
+  background: #2c2547;
+  color: #c9b8ff;
+  border: 1px solid rgba(201, 184, 255, 0.35);
 }
 
 .psa-status {
-  font-size: 10px;
+  font-size: 9px;
+  font-weight: 700;
   border-radius: 4px;
-  padding: 0 5px;
-  font-weight: 600;
+  padding: 1px 5px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
 }
 
 .psa-status-psn, .psa-status-tox { background: #7b1fa2; color: #fff; }
@@ -454,11 +626,12 @@
    Fill width = remaining HP; color = how much is left (green healthy →
    amber mid → red sliver), on the same 35/70 scale as the damage bars. */
 .psa-hpbar {
-  height: 5px;
+  height: 6px;
   border-radius: 3px;
-  background: #2e3340;
+  background: #242b38;
   overflow: hidden;
-  margin: 6px 0 3px;
+  margin: 0 0 3px;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.45);
 }
 
 .psa-hpfill {
@@ -467,33 +640,46 @@
   transition: width 0.25s ease;
 }
 
-.psa-hp-high { background: var(--psa-ok); }
-.psa-hp-mid { background: var(--psa-warn); }
-.psa-hp-low { background: var(--psa-danger); }
+.psa-hp-high { background: linear-gradient(90deg, #4ade80, #69db7c); }
+.psa-hp-mid { background: linear-gradient(90deg, #f5b31e, #ffd54f); }
+.psa-hp-low { background: linear-gradient(90deg, #ef4444, #ff6b6b); }
 .psa-hp-unknown { background: #4a5160; }
 
 .psa-card-hp {
-  font-size: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10px;
   color: var(--psa-muted);
-  margin-bottom: 3px;
+  margin-bottom: 4px;
+  font-variant-numeric: tabular-nums;
 }
 
-/* Stats row: exact values for our team, estimated ranges for theirs. */
+/* Stats row: exact values for our team, estimated ranges for theirs —
+   rendered as small chips so the card reads as data, not prose. */
 .psa-stats {
   display: flex;
   flex-wrap: wrap;
-  gap: 2px 7px;
-  font-size: 10.5px;
-  color: var(--psa-muted);
-  margin-bottom: 3px;
+  gap: 3px;
+  margin-bottom: 4px;
 }
 
 .psa-stat {
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  padding: 0 5px;
+  font-size: 9.5px;
+  line-height: 1.5;
+  color: var(--psa-muted);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
 .psa-stat-exact {
   color: var(--psa-ok);
+  border-color: rgba(105, 219, 124, 0.28);
+  background: rgba(105, 219, 124, 0.09);
 }
 
 /* A range narrowed by the species-keyed speed memory (observed move order).
@@ -501,58 +687,152 @@
    for hidden threats, so it reads as learned, not revealed. */
 .psa-stat-remembered {
   color: var(--psa-warn);
-  border-bottom: 1px dashed rgba(255, 202, 40, 0.45);
+  border-color: rgba(255, 213, 79, 0.3);
+  border-bottom: 1px dashed rgba(255, 213, 79, 0.5);
 }
 
-/* Active-matchup comparison: our lead vs their lead, side by side. */
+.psa-card-moves {
+  font-size: 11.5px;
+  color: #cdd4df;
+  word-break: break-word;
+}
+
+.psa-hidden {
+  color: var(--psa-faint);
+  font-size: 10px;
+}
+
+.psa-card-details {
+  color: var(--psa-faint);
+  font-size: 10px;
+  margin-top: 3px;
+  line-height: 1.45;
+}
+
+.psa-boosts {
+  color: var(--psa-warn);
+  font-size: 10.5px;
+  margin-top: 2px;
+}
+
+.psa-ev {
+  color: var(--psa-ok);
+  font-size: 10.5px;
+  margin-top: 2px;
+}
+
+.psa-potential {
+  font-size: 10px;
+  color: var(--psa-warn);
+  margin-top: 3px;
+  word-break: break-word;
+}
+
+.psa-muted {
+  color: var(--psa-muted);
+}
+
+/* Per-card predicted-damage comparison (You box switch candidates). */
+.psa-card-vs {
+  font-size: 10.5px;
+  margin-top: 3px;
+  line-height: 1.4;
+  color: var(--psa-muted);
+}
+
+.psa-card-vs .psa-card-vs-warn {
+  color: var(--psa-warn);
+}
+
+.psa-card-vs .psa-card-vs-danger {
+  color: var(--psa-danger);
+  font-weight: 600;
+}
+
+.psa-card-vs .psa-card-vs-good {
+  color: var(--psa-ok);
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------------ */
+/* Active-matchup comparison: our lead vs their lead, side by side.    */
+/* ------------------------------------------------------------------ */
+
 .psa-matchup {
-  margin-top: 8px;
+  background: var(--psa-surface);
+  border: 1px solid var(--psa-border-soft);
+  border-radius: 10px;
   padding: 8px 10px;
-  background: #1b1f27;
-  border: 1px solid #2e3340;
-  border-radius: 8px;
 }
 
 .psa-match-head {
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
-  gap: 4px 6px;
-  margin-bottom: 6px;
+  gap: 5px 7px;
+  margin-bottom: 7px;
 }
 
 .psa-match-name {
-  font-weight: 600;
-  font-size: 12px;
+  font-weight: 700;
+  font-size: 13px;
 }
 
 .psa-match-vs {
-  color: var(--psa-muted);
-  font-size: 11px;
+  color: var(--psa-faint);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-weight: 600;
 }
 
 .psa-match-speed {
   color: var(--psa-accent);
-  font-size: 11px;
+  font-size: 10.5px;
   margin-left: auto;
   text-align: right;
+  background: var(--psa-accent-dim);
+  border: 1px solid rgba(86, 199, 255, 0.3);
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .psa-match-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 11.5px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.psa-match-table th {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--psa-faint);
+  padding: 1px 4px 4px;
+  text-align: center;
+}
+
+.psa-match-table th.psa-match-th-label {
+  text-align: left;
+  width: 44px;
 }
 
 .psa-match-table td {
-  padding: 2px 4px;
+  padding: 3px 4px;
   text-align: center;
 }
 
 .psa-match-table td:first-child {
   text-align: left;
-  color: var(--psa-muted);
+  color: var(--psa-faint);
   width: 44px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
 }
 
 .psa-match-us-col {
@@ -562,19 +842,24 @@
 /* Stat comparison: green = the side that definitely wins this stat.
    Only applied when the ranges don't overlap, so it's honest, not noise. */
 .psa-match-win {
-  background: rgba(102, 187, 106, 0.16);
+  background: rgba(105, 219, 124, 0.13);
+  color: var(--psa-ok);
   font-weight: 600;
   border-radius: 3px;
 }
 
 .psa-match-lose {
-  color: var(--psa-muted);
-  opacity: 0.75;
+  color: #5f6673;
+  opacity: 0.85;
 }
 
 .psa-match-row-spe td {
-  border-top: 1px solid #2e3340;
+  border-top: 1px solid var(--psa-border);
   font-weight: 600;
+  color: var(--psa-accent);
+}
+
+.psa-match-row-spe td:first-child {
   color: var(--psa-accent);
 }
 
@@ -591,7 +876,7 @@
   width: 36px;
   height: 5px;
   border-radius: 3px;
-  background: #2e3340;
+  background: #242b38;
   overflow: hidden;
   margin-left: 2px;
 }
@@ -628,7 +913,7 @@
   font-weight: 700;
   line-height: 1;
   color: var(--psa-warn);
-  background: rgba(16, 18, 24, 0.94);
+  background: rgba(12, 14, 20, 0.96);
   border: 1px solid #5f5a2a;
   border-radius: 3px;
   padding: 2px 4px;
@@ -663,7 +948,7 @@
   font-weight: 700;
   line-height: 1;
   color: #ff8a80;
-  background: rgba(16, 18, 24, 0.92);
+  background: rgba(12, 14, 20, 0.94);
   border: 1px solid #5c1f1f;
   border-radius: 3px;
   padding: 1px 3px;
@@ -692,12 +977,12 @@
 /* Expanded full damage calc (hidden until a Damage bar is clicked). */
 .psa-calc-panel {
   display: none;
-  margin-top: 6px;
-  padding: 6px 8px;
-  background: #161a21;
-  border: 1px solid #2e3340;
-  border-radius: 6px;
-  font-size: 11px;
+  margin-top: 7px;
+  padding: 7px 9px;
+  background: #12161e;
+  border: 1px solid var(--psa-border-soft);
+  border-radius: 8px;
+  font-size: 10.5px;
 }
 
 .psa-matchup.psa-calc-open .psa-calc-panel {
@@ -706,28 +991,30 @@
 
 .psa-calc-head {
   color: var(--psa-muted);
-  font-size: 10.5px;
+  font-size: 9.5px;
   text-transform: uppercase;
-  letter-spacing: 0.4px;
-  margin-bottom: 5px;
+  letter-spacing: 0.8px;
+  margin-bottom: 6px;
+  font-weight: 600;
 }
 
 .psa-calc-cols {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  gap: 10px;
 }
 
 .psa-calc-title {
   color: var(--psa-muted);
-  margin-bottom: 2px;
+  margin-bottom: 3px;
+  font-size: 10px;
 }
 
 .psa-calc-move {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 1px 0;
+  padding: 2px 0;
 }
 
 .psa-calc-move-name {
@@ -740,6 +1027,7 @@
 .psa-calc-roll {
   margin-left: auto;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* The likely hidden move's row: dashed bar = unconfirmed until revealed. */
@@ -769,30 +1057,9 @@
   background: var(--psa-danger);
 }
 
-/* Per-card predicted-damage comparison (You box switch candidates). */
-.psa-card-vs {
-  font-size: 11px;
-  margin-top: 2px;
-  line-height: 1.35;
-}
-
-.psa-card-vs .psa-card-vs-warn {
-  color: var(--psa-warn);
-}
-
-.psa-card-vs .psa-card-vs-danger {
-  color: var(--psa-danger);
-  font-weight: 600;
-}
-
-.psa-card-vs .psa-card-vs-good {
-  color: var(--psa-ok);
-  font-weight: 600;
-}
-
 /* Predicted-damage row: green = deals more, red = potential OHKO on us. */
 .psa-match-row-dmg td {
-  border-top: 1px solid #2e3340;
+  border-top: 1px solid var(--psa-border);
 }
 
 .psa-match-row-dmg .psa-match-danger {
@@ -816,47 +1083,24 @@
   font-weight: 400;
 }
 
-.psa-card-moves {
-  font-size: 12px;
-  word-break: break-word;
-}
-
-.psa-hidden {
-  color: var(--psa-muted);
-  font-size: 11px;
-}
-
-.psa-card-details {
-  color: var(--psa-muted);
-  font-size: 11px;
-  margin-top: 2px;
-}
-
-.psa-boosts {
-  color: var(--psa-warn);
-  font-size: 11px;
-  margin-top: 2px;
-}
-
-.psa-ev {
-  color: var(--psa-ok);
-  font-size: 11px;
-  margin-top: 2px;
-}
-
-.psa-muted {
-  color: var(--psa-muted);
-}
-
 /* Action log */
 .psa-log {
-  margin-top: 8px;
-  font-size: 12px;
+  margin-top: 10px;
+  font-size: 11.5px;
 }
 
 .psa-log summary {
   cursor: pointer;
   color: var(--psa-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  user-select: none;
+}
+
+.psa-log summary:hover {
+  color: var(--psa-text);
 }
 
 .psa-log ol {
@@ -865,11 +1109,12 @@
   color: var(--psa-text);
   max-height: 160px;
   overflow-y: auto;
+  font-size: 11px;
 }
 
 .psa-log-turn {
-  color: var(--psa-muted);
-  font-size: 11px;
+  color: var(--psa-faint);
+  font-size: 10px;
 }
 
 /* ------------------------------------------------------------------ */
@@ -884,9 +1129,9 @@
 }
 
 .psa-hide {
-  background: #2d323d;
+  background: #232a37;
   color: var(--psa-text);
-  border: 1px solid var(--psa-border);
+  border: 1px solid #303848;
   border-radius: 6px;
   width: 24px;
   height: 24px;
@@ -894,10 +1139,14 @@
   font-size: 14px;
   line-height: 1;
   margin-left: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s ease;
 }
 
 .psa-hide:hover {
-  background: #3a4150;
+  background: #2d3646;
 }
 
 .psa-reopen {
@@ -910,12 +1159,15 @@
   border-radius: 50%;
   font-size: 18px;
   cursor: pointer;
-  background: #22262f;
+  background: #1a2130;
   color: var(--psa-text);
   border: 1px solid var(--psa-border);
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .psa-reopen:hover {
-  background: #2d323d;
+  background: #232a37;
 }
