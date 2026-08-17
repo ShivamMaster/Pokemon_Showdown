@@ -28,6 +28,8 @@ export {
   hazardCount,
   chipPerTurn,
   moveConditionalSwitchProbs,
+  bestPriorityMove,
+  raceProjection,
   offensiveValue,
   teamWincon,
   sweepPotential,

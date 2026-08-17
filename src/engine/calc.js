@@ -203,10 +203,20 @@ export function damagePercent(gen, atkMon, defMon, moveName, field, opts = {}) {
   // The estimator pins one stat to a candidate EV while everything else stays
   // at defaults: `opts.attackerEvs` / `opts.defenderEvs` fully override the
   // category-based defaults for that side.
-  const atkEvs =
-    opts.attackerEvs ?? (move.category === 'Physical' ? { atk: 252 } : { spa: 252 });
-  const defEvs =
-    opts.defenderEvs ?? (move.category === 'Physical' ? { hp: 252, def: 252 } : { hp: 252, spd: 252 });
+  //
+  // Foul Play is the exception: the calc swaps the attack source to the
+  // TARGET (its own gen789 mechanics do `attackSource = defender`), so the
+  // defender's Atk — not the attacker's — powers the move. The standard
+  // "attacker is 252-invested" assumption therefore belongs on the
+  // defender's Atk (it's the stat the move runs off), and the attacker's own
+  // attacking stat is irrelevant (its EVs only matter for other moves).
+  const isFoulPlay = move.name === 'Foul Play';
+  const atkEvs = isFoulPlay
+    ? (opts.attackerEvs ?? {})
+    : (opts.attackerEvs ?? (move.category === 'Physical' ? { atk: 252 } : { spa: 252 }));
+  const defEvs = isFoulPlay
+    ? (opts.defenderEvs ?? { hp: 252, def: 252, atk: 252 })
+    : (opts.defenderEvs ?? (move.category === 'Physical' ? { hp: 252, def: 252 } : { hp: 252, spd: 252 }));
   const useEstimates = opts.useEstimates !== false;
   let attacker;
   let defender;

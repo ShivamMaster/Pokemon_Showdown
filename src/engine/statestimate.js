@@ -180,6 +180,50 @@ export function evFromRange(range, fallback) {
   return Math.max(0, Math.min(252, Math.round((range[0] + range[1]) / 2 / EV_STEP) * EV_STEP));
 }
 
+// Narrow ONE of the defender's stats from a Foul Play hit. Foul Play runs off
+// the defender's Atk (growing in EV) and hits against the defender's own Def
+// (shrinking in EV) — so both axes are the defender's, and the stat being
+// searched is pinned while the other is held at its current estimate (252
+// default). Monotonic in both directions, so the same binary-search machinery
+// as narrowStat applies, just over a custom EV layout.
+function narrowFoulPlayStat(gen, attacker, defender, moveName, field, stat, damagePct, prev) {
+  const pick = (mon, s, fallback) => {
+    const r = mon?.evEstimate?.[s];
+    if (!r) return fallback;
+    const width = r[1] - r[0];
+    if (width > MAX_TRUSTED_WIDTH) return fallback;
+    return Math.max(0, Math.min(252, Math.round((r[0] + r[1]) / 2 / EV_STEP) * EV_STEP));
+  };
+  const held = {
+    hp: pick(defender, 'hp', 252),
+    atk: pick(defender, 'atk', 252),
+    def: pick(defender, 'def', 252),
+  };
+  const range = (ev) => {
+    const d = damagePercent(gen, attacker, defender, moveName, field, {
+      defenderEvs: { ...held, [stat]: ev },
+      useEstimates: false,
+    });
+    if (!d) return null;
+    return { min: d.min, max: d.max };
+  };
+  if (!range(EV_MIN) || !range(EV_MAX)) return prev ?? null; // move/species calc failed
+  // Atk is the attack source (damage GROWS with EV — use the attacker-side
+  // boundary tests); Def is the defensive stat (damage SHRINKS — defender-side
+  // tests).
+  const lo = stat === 'atk'
+    ? firstTrue((ev) => range(ev).max >= damagePct - TOL)
+    : firstTrue((ev) => range(ev).min <= damagePct + TOL);
+  const hi = stat === 'atk'
+    ? lastTrue((ev) => range(ev).min <= damagePct + TOL)
+    : lastTrue((ev) => range(ev).max >= damagePct - TOL);
+  if (lo == null || hi == null || lo > hi) return prev ?? null;
+  const next = [lo, hi];
+  if (!prev) return next;
+  const merged = [Math.max(prev[0], next[0]), Math.min(prev[1], next[1])];
+  return merged[0] <= merged[1] ? merged : prev;
+}
+
 // Apply a damage observation to both mon records (mutates mon.evEstimate).
 // The attacker's offensive stat and the defender's defensive stat are
 // narrowed: first the attacker (defender held at its current estimate), then
@@ -205,6 +249,24 @@ export function applyObservation(state, obs, gen = state?.gen ?? 9) {
     return; // unknown move — can't estimate
   }
   if (!category || category === 'Status') return;
+
+  // Foul Play uses the TARGET's Attack stat: the damage depends on the
+  // defender's Atk (grows with EV) and the defender's Def (shrinks with EV)
+  // — the battle attacker's stats don't matter at all. So a Foul Play hit is
+  // evidence about the DEFENDER's investment, not the attacker's. The generic
+  // path pins the calc's attacker-side offensive stat, which Foul Play
+  // ignores, so search the defender's Atk/Def directly.
+  if (obs.move === 'Foul Play') {
+    if (!(obs.damagePct > 0 && obs.damagePct <= 100)) return;
+    defender.evEstimate ??= {};
+    defender.evEstimate.atk = narrowFoulPlayStat(
+      gen, attacker, defender, obs.move, field, 'atk', obs.damagePct, defender.evEstimate.atk
+    );
+    defender.evEstimate.def = narrowFoulPlayStat(
+      gen, attacker, defender, obs.move, field, 'def', obs.damagePct, defender.evEstimate.def
+    );
+    return;
+  }
 
   const atkStat = category === 'Physical' ? 'atk' : 'spa';
   const defStat = category === 'Physical' ? 'def' : 'spd';

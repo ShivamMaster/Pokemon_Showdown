@@ -1318,3 +1318,160 @@ test('recommend: no weather warnings when the field is already that weather', ()
     'no warning when their weather move would just re-set what is already up'
   );
 });
+
+// ---------------------------------------------------------------------------
+// Their setup prediction
+// ---------------------------------------------------------------------------
+
+test('setup: a healthy setup-holder is staying to boost (P stay rises)', () => {
+  const dn = createPokemon({ ident: 'p2a: Dragonite', side: 'p2', species: 'Dragonite', level: 100 });
+  dn.hpPercent = 80;
+  addMove(dn, 'Dragon Dance');
+  addMove(dn, 'Outrage');
+  const plain = createPokemon({ ident: 'p2a: Garchomp', side: 'p2', species: 'Garchomp', level: 100 });
+  plain.hpPercent = 80;
+  addMove(plain, 'Earthquake');
+  assert.ok(predictStayProb(dn) > predictStayProb(plain), 'a revealed setup move should make them likelier to stay');
+});
+
+test('setup: warns when their active is about to set up and we cannot KO it', () => {
+  const state = makeState({
+    ourActive: { species: 'Ferrothorn', moves: ['Gyro Ball'] },
+    theirActive: { species: 'Dragonite', hpPercent: 100, moves: ['Dragon Dance', 'Outrage'] },
+  });
+  const rec = recommend(state);
+  assert.ok(
+    rec.reasoning.some((r) => r.includes('Dragon Dance') && r.includes('about to set up')),
+    `expected an about-to-set-up warning, got: ${JSON.stringify(rec.reasoning)}`
+  );
+});
+
+test('setup: says KO it NOW when our best move already finishes the setup threat', () => {
+  const state = makeState({
+    ourActive: { species: 'Deoxys-Attack', moves: ['Superpower', 'Ice Beam'] },
+    theirActive: { species: 'Dragonite', hpPercent: 100, moves: ['Dragon Dance', 'Outrage'] },
+  });
+  const rec = recommend(state);
+  assert.ok(
+    rec.reasoning.some((r) => r.includes('Dragon Dance') && r.includes('KO it NOW')),
+    `expected a KO-it-now warning, got: ${JSON.stringify(rec.reasoning)}`
+  );
+});
+
+test('setup: no warning once they already boosted', () => {
+  const state = makeState({
+    ourActive: { species: 'Ferrothorn', moves: ['Gyro Ball'] },
+    theirActive: { species: 'Dragonite', hpPercent: 100, moves: ['Dragon Dance', 'Outrage'], boosts: { atk: 1 } },
+  });
+  const rec = recommend(state);
+  assert.ok(
+    !rec.reasoning.some((r) => r.includes('about to set up')),
+    'an already-boosted mon is a live threat, not an incoming boost'
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Item-condition plays (Focus Sash / Weakness Policy)
+// ---------------------------------------------------------------------------
+
+test('items: a revealed Focus Sash eats the KO call at full HP', () => {
+  const state = makeState({
+    ourActive: { species: 'Kyurem', moves: ['Ice Beam'] },
+    theirActive: { species: 'Garchomp', hpPercent: 100, moves: ['Earthquake'], item: 'Focus Sash' },
+  });
+  const rec = recommend(state);
+  assert.ok(rec.bestMove, 'a move should still be recommended');
+  assert.ok(
+    rec.reasoning.some((r) => r.includes('Focus Sash survives it (1 HP)')),
+    `expected a sash note, got: ${JSON.stringify(rec.reasoning)}`
+  );
+  assert.ok(
+    !rec.bestMove.note.includes('guaranteed KO') && !rec.bestMove.note.includes('can KO'),
+    `a full-HP sash holder cannot be KO'd by one hit: ${rec.bestMove.note}`
+  );
+  assert.ok(!rec.reasoning.some((r) => r.includes('guarantees a KO')), 'no KO callout through the sash');
+});
+
+test('items: clicking a super-effective move into a revealed Weakness Policy is flagged', () => {
+  const state = makeState({
+    ourActive: { species: 'Milotic', moves: ['Ice Beam', 'Scald'] },
+    theirActive: { species: 'Dragonite', hpPercent: 100, moves: ['Outrage', 'Earthquake'], item: 'Weakness Policy' },
+  });
+  const rec = recommend(state);
+  assert.ok(
+    rec.reasoning.some((r) => r.includes('triggers their Weakness Policy')),
+    `expected a Weakness Policy warning, got: ${JSON.stringify(rec.reasoning)}`
+  );
+});
+
+test('items: a move that KOs the WP holder never triggers it', () => {
+  const state = makeState({
+    ourActive: { species: 'Kyurem', moves: ['Ice Beam'] },
+    theirActive: { species: 'Dragonite', hpPercent: 100, moves: ['Outrage'], item: 'Weakness Policy' },
+  });
+  const rec = recommend(state);
+  assert.ok(
+    !rec.reasoning.some((r) => r.includes('triggers their Weakness Policy')),
+    'a faint cannot activate Weakness Policy'
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Tera timing
+// ---------------------------------------------------------------------------
+
+test('tera: recommends terastallizing when it is the difference between dying and surviving', () => {
+  // Aggron is 4×-weak to Earthquake; tera Grass turns it into a ½× resist —
+  // at 30% HP that is the difference between dying and surviving.
+  const state = makeState({
+    ourActive: { species: 'Aggron', hpPercent: 30, moves: ['Heavy Slam'], teraType: 'Grass', canTera: true },
+    theirActive: { species: 'Garchomp', moves: ['Earthquake'] },
+  });
+  const rec = recommend(state);
+  assert.ok(
+    rec.reasoning.some((r) => r.includes('terastallizing your Aggron') && r.includes('survive')),
+    `expected a tera-save suggestion, got: ${JSON.stringify(rec.reasoning)}`
+  );
+});
+
+test('tera: warns when their revealed tera type would flip our best move', () => {
+  const state = makeState({
+    ourActive: { species: 'Rillaboom', moves: ['Wood Hammer', 'Knock Off'] },
+    theirActive: { species: 'Great Tusk', hpPercent: 100, moves: ['Earthquake', 'Headlong Rush'], teraType: 'Grass' },
+  });
+  const rec = recommend(state);
+  assert.ok(
+    rec.reasoning.some((r) => r.includes('can terastallize into Grass') && r.includes('Wood Hammer drops')),
+    `expected a tera-flip warning, got: ${JSON.stringify(rec.reasoning)}`
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 2-turn lookahead (race projection)
+// ---------------------------------------------------------------------------
+
+test('race: warns when they finish us faster than we finish them', () => {
+  const state = makeState({
+    ourActive: { species: 'Ferrothorn', hpPercent: 40, moves: ['Gyro Ball'] },
+    theirActive: { species: 'Garchomp', hpPercent: 100, moves: ['Earthquake', 'Outrage'] },
+  });
+  const rec = recommend(state);
+  assert.ok(
+    rec.reasoning.some((r) => r.includes('Race check') && r.includes('finishes you in ~1 turn')),
+    `expected a race warning, got: ${JSON.stringify(rec.reasoning)}`
+  );
+});
+
+test('race: no warning when our move already KOs this turn', () => {
+  // Superpower only does ~35% at full HP — but on a 30% Garchomp it KOs, so
+  // the race is over before it matters and no warning should appear.
+  const state = makeState({
+    ourActive: { species: 'Deoxys-Attack', moves: ['Superpower'] },
+    theirActive: { species: 'Garchomp', hpPercent: 30, moves: ['Earthquake'] },
+  });
+  const rec = recommend(state);
+  assert.ok(
+    !rec.reasoning.some((r) => r.includes('Race check')),
+    'a KO this turn ends the race before it matters'
+  );
+});

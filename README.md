@@ -58,6 +58,84 @@ best move, built in stages:
     move log + a random-battle flag into the opponent's profile, and the
     options page can export all profiles as a downloadable .txt backup
     (save it in the repo's gitignored `exports/` folder).
+14. **Engine depth round 2** (done) — six new engines on top of the pro-level
+    core: **Foul Play** is calculated and learned correctly (the move runs off
+    the TARGET's Attack, so the calc assumes their Atk is the invested stat and
+    observed Foul Play hits narrow the defender's EVs — never the attacker's);
+    **priority-move awareness** (a revealed Aqua Jet / Sucker Punch / Extreme
+    Speed / Bullet Punch beats the Speed read: KO calls stop claiming "safe"
+    when their priority move can pick you off, your own priority move lands
+    the KO when outsped, switch speed-rewards yield to priority threats, and
+    endgame 1v1s are decided by priority KOs regardless of who is faster);
+    **their-setup prediction** (a healthy mon with a revealed setup move is
+    staying to boost — the engine says "KO it NOW before it sets up" or
+    "switch before it sweeps", and switching into a setup threat is nudged
+    down); **tera timing** (recommend terastallizing when it flips a losing
+    matchup — the survive-the-KO read — and warn when their revealed tera
+    type would flip yours); **item-condition plays** (a full-HP Focus Sash
+    eats the KO call and the chip-the-sash-first note replaces it, and
+    clicking a super-effective move into a revealed Weakness Policy prices in
+    the +2 counter-attack); and a **2-turn race projection** ("their X
+    finishes you in ~2 turns at ~53%/turn — win now or switch").
+
+## Stage 14: the six new engines
+
+- **Foul Play** — `@smogon/calc` already swaps the attack source for Foul
+  Play internally (`attackSource = defender`), but this engine's wrapper made
+  two wrong assumptions around it: it gave the *attacker* the 252-EV
+  investment (irrelevant — the calc ignores it) and the *defender* none in
+  Atk (the stat that actually powers the move). `damagePercent` now puts the
+  standard 252-EV attacker assumption on the **defender's Atk** for Foul
+  Play, so the move finally prices a physical attacker's investment (~+20%
+  vs an invested Garchomp), and the stat estimator no longer "learns" the
+  attacker's Atk from a Foul Play hit — the observation narrows the
+  defender's Atk (the attack source) and Def instead. The move note says
+  "uses their Attack" so the read is explicit: it's a physical-attacker
+  answer, weak against special walls.
+- **Priority-move awareness** (`movePriority` in speed.js, `bestPriorityMove`
+  in recommend.js) — priority beats Speed, and the engine now honors it
+  everywhere Speed was the only judge:
+  - **KO calls**: "you outspeed — safe to go for the KO" is cancelled when
+    their active holds a revealed priority move that can KO you first (the
+    bonus becomes a penalty: "their Extreme Speed can KO you first
+    (priority)"); a priority move of yours strikes first even when outsped
+    ("they outspeed you, but Ice Shard has priority — you strike first").
+    Grassy Glide counts as priority only while Grassy Terrain is up.
+  - **Switches**: a candidate their priority move can KO loses the
+    outspeed reward ("their Scizor's Bullet Punch can KO Rillaboom before
+    it acts (priority)"), and a candidate with a priority KO of its own is
+    rewarded despite being outsped.
+  - **Endgame 1v1s**: a priority KO on either side decides the duel
+    outright ("their Dragonite beats your Rillaboom 1v1 (priority KO) —
+    avoid that pairing").
+- **Their setup prediction** — `predictStayProb` bumps a healthy mon's
+  stay-probability when it holds a revealed setup move it hasn't used yet
+  (pros set up on the switch-in), and the reasoning warns: "their Dragonite
+  has Dragon Dance — it's about to set up. KO it now or switch before it
+  sweeps" (or "KO it NOW before it sets up" when your best move already
+  finishes it). Switching into a setup threat that the candidate can't even
+  wall is nudged down: "switching gives it a free turn to set up".
+- **Tera timing** — the tera suggestion now includes the **flip-a-losing-
+  matchup** read: when their hit KOs you and terastallizing into your tera
+  type makes you survive it, the line says "tera-Water turns their ~139%
+  hit into ~35% — you survive it" (that's the moment to press the button,
+  not a marginal damage trade). And a revealed-but-unused **their** tera
+  type that would flip YOUR matchup is warned: "their Great Tusk can
+  terastallize into Grass: your Wood Hammer drops ~63% → ~16% — plan around
+  it". The tera block moved earlier in the reasoning so it survives the
+  9-line budget in busy turns.
+- **Item-condition plays** — a revealed, unconsumed **Focus Sash** on a
+  full-HP target eats the KO: the "guaranteed KO" claim is dropped and the
+  note becomes "their Focus Sash survives it (1 HP) — chip it first". A
+  revealed **Weakness Policy** that your super-effective click would trigger
+  is priced into the move ("⚠ Ice Beam triggers their Weakness Policy —
+  their Dragonite gets +2 and hits for ~101%") — unless the move KOs, since
+  a faint can't boost.
+- **2-turn race projection** (`raceProjection`) — hazard + chip + speed
+  formalized into a simple race: when they finish you in ≤2 turns and you
+  can't finish them first, the reasoning calls it: "Race check: their
+  Garchomp finishes you in ~1 turn at ~46%/turn — you can't outlast it; win
+  this turn or switch".
 
 ## Stage 8: pixel OCR fallback
 
@@ -334,7 +412,7 @@ The E2E uses Chrome for Testing because managed/system Chrome blocks
 npx @puppeteer/browsers install chrome@stable --path /tmp/cft-chrome
 ```
 
-Tests (128): the reader (real battle + edge cases, the live `|request|`
+Tests (333): the reader (real battle + edge cases, the live `|request|`
 fixture with moves/PP/tera/canTera, and hover observations), the UI
 renderer (including the six-slot grid, opponent potential-moves line, and
 capture status row), the engine (type advantage, KO detection, switch
@@ -519,7 +597,49 @@ captured from a real battle page and parses identically.
     ≤4 mons, the engine enumerates the remaining 1v1s (best moves, remaining
     HP, speed order) and calls out the decided ones: "your Rillaboom beats
     their Garchomp 1v1 (1HKO vs their 4HKO) — locked in" and "their Dragapult
-    beats your X 1v1 — avoid that pairing".
+    beats your X 1v1 — avoid that pairing". Priority KOs decide a duel
+    outright — a revealed Extreme Speed that finishes the faster mon flips
+    the verdict and is labeled "(priority KO)".
+  - **Priority-move awareness** (`movePriority` in speed.js — Grassy Glide
+    counts only on Grassy Terrain — and `bestPriorityMove` in recommend.js):
+    priority beats Speed, so the engine stops trusting an outspeed read when
+    it doesn't hold. A revealed priority move on their active that can KO you
+    cancels the "safe KO" bonus ("their Extreme Speed can KO you first
+    (priority)"); your own priority move lands the KO even when outsped
+    ("they outspeed you, but Ice Shard has priority — you strike first"); a
+    switch-in their priority move can KO loses its speed reward; a candidate
+    with a priority KO of its own is rewarded; and a ⚠ reasoning line says
+    plainly when their priority move beats your Speed.
+  - **Their setup prediction**: a healthy active with a revealed setup move
+    (Dragon Dance, Calm Mind, Shell Smash, …) it hasn't used is staying to
+    boost — `predictStayProb` bumps P(stay), and the reasoning warns "their
+    Dragonite has Dragon Dance — it's about to set up. KO it now or switch
+    before it sweeps" (or "KO it NOW" when your best move already finishes
+    it). Switching into a setup threat the candidate can't wall is nudged
+    down with the note "switching gives it a free turn to set up".
+  - **Tera timing**: the tera suggestion adds the flip-a-losing-matchup read
+    — their hit KOs you, tera makes you survive it ("tera-Grass turns their
+    ~107% hit into ~13% — you survive it") — and a revealed-but-unused
+    THEIR tera type that would flip your matchup is warned ("their Great
+    Tusk can terastallize into Grass: your Wood Hammer drops ~63% → ~16% —
+    plan around it"). The tera block moved earlier in the reasoning so it
+    survives the 9-line budget.
+  - **Item-condition plays**: a revealed Focus Sash on a full-HP target
+    eats the KO — the "guaranteed KO" claim is dropped and the note says
+    "their Focus Sash survives it (1 HP) — chip it first"; a super-effective
+    click into a revealed Weakness Policy prices in the +2 counter ("⚠ Ice
+    Beam triggers their Weakness Policy — their Dragonite gets +2 and hits
+    for ~101%") unless the move KOs (a faint can't boost).
+  - **2-turn race projection** (`raceProjection`): hazard + chip + speed
+    formalized into a race — when they finish you in ≤2 turns and you can't
+    finish them first, the reasoning calls it ("Race check: their Garchomp
+    finishes you in ~1 turn at ~46%/turn — you can't outlast it; win this
+    turn or switch").
+  - **Foul Play** (see Stage 14): `damagePercent` puts the 252-EV attacker
+    assumption on the DEFENDER's Atk for Foul Play (that's the stat the move
+    runs off), the stat estimator attributes observed Foul Play hits to the
+    defender's Atk/Def instead of the attacker's, and the move note says
+    "uses their Attack".
 - **Active-matchup view** — the panel shows your lead vs their lead side by
   side: HP, all five stats (exact for you, estimated ranges for them that
   narrow with learned EVs / hovered Spe), item, and ability, with the
@@ -645,7 +765,7 @@ reader.applyLine(line); // one protocol line at a time
 npm test
 ```
 
-128 tests cover the reader (real 22-turn Gen 9 OU battle + edge cases),
+333 tests cover the reader (real 22-turn Gen 9 OU battle + edge cases),
 the UI (model, HTML output, escaping, mid-battle and empty states, the
 six-slot grid, potential moves, capture status), the engine (type
 advantage, KO detection, switch advice, utility moves, calc consistency,

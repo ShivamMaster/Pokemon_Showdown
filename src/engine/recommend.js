@@ -24,7 +24,7 @@
 import { SPECIES, MOVES } from '@smogon/calc';
 import { damagePercent, buildField, fieldAfter, round1, effectivenessOf } from './calc.js';
 import { worstThreat, teamThreats } from './movepool.js';
-import { speedOrder, speedLine } from './speed.js';
+import { speedOrder, speedLine, movePriority } from './speed.js';
 
 const clamp01 = (n) => Math.max(0, Math.min(1, n));
 
@@ -233,6 +233,11 @@ export function predictStayProb(theirActive, profile = null, justSwitched = fals
   // its HP. (This is why a move recommendation right after their switch
   // should target the new active, not their bench.)
   if (justSwitched) p = Math.max(p, 0.9);
+  // A healthy mon with a revealed setup move is staying to boost — pros set
+  // up on the switch-in, and they didn't bring this mon out to leave.
+  if (hp >= 50 && (theirActive?.moves ?? []).some((m) => SETUP_MOVES.has(m)) && !(theirActive.boosts?.atk || theirActive.boosts?.spa)) {
+    p = Math.min(0.95, p + 0.1);
+  }
   if (profile?.switchTendency?.atLowHp != null && hp < 40 && !justSwitched) {
     p = 1 - profile.switchTendency.atLowHp;
   }
@@ -458,8 +463,44 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
   // (healing like Leftovers only raises it and never helps a KO).
   const chip = chipPerTurn(theirTarget, gen, field);
   const effHp = targetHp + Math.min(0, chip);
-  const ko = vsTarget.max >= effHp;
-  const koGuaranteed = vsTarget.min >= effHp;
+  let ko = vsTarget.max >= effHp;
+  let koGuaranteed = vsTarget.min >= effHp;
+  // Item-condition plays: a revealed, unconsumed item on their active changes
+  // what a hit actually accomplishes.
+  const theirItem = theirTarget.itemRevealed && !theirTarget.itemConsumed ? theirTarget.item : null;
+  // Focus Sash: at full HP, the first hit always leaves them at 1 HP — a
+  // "KO" is really "survives on the Sash". The damage still lands, but the
+  // KO (and its reward) don't exist, and the chip the hit applies is capped
+  // at leaving them alive.
+  const sashAlive = theirItem === 'Focus Sash' && (theirTarget.hpPercent ?? 100) >= 99;
+  if (sashAlive) {
+    ko = false;
+    koGuaranteed = false;
+  }
+  // Weakness Policy: clicking a super-effective move on a revealed WP holder
+  // hands them +2 Atk/SpA (unless the move KOs them — a faint can't boost).
+  // The boosted counter is priced into the move's score so the "click the SE
+  // move" read doesn't blindly feed their WP.
+  const wpTrigger = theirItem === 'Weakness Policy' && vsTarget.effectiveness >= 2 && !ko;
+  let wpPenalty = 0;
+  let wpNote = null;
+  if (wpTrigger) {
+    const boosted = {
+      ...theirTarget,
+      boosts: {
+        ...(theirTarget.boosts ?? {}),
+        atk: (theirTarget.boosts?.atk ?? 0) + 2,
+        spa: (theirTarget.boosts?.spa ?? 0) + 2,
+      },
+    };
+    const boostedIn = incomingPercent(boosted, attacker, gen, field, calcOpts).pct;
+    const nowIn = incomingPercent(theirTarget, attacker, gen, field, calcOpts).pct;
+    if (boostedIn > nowIn) {
+      wpPenalty = Math.min(10, (boostedIn - nowIn) * 0.2);
+      wpNote = `⚠ ${moveName} triggers their Weakness Policy — their ${theirTarget.species} gets +2 and hits for ~${round1(boostedIn)}%`;
+    }
+  }
+  score -= wpPenalty;
   // Risk-aware KO reward: safe mode prefers the guaranteed roll (a gamble on
   // a non-guaranteed KO could hand the lead back), aggressive mode prefers
   // the swing (the 60% roll that wins if it lands is the comeback play).
@@ -470,21 +511,47 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
   // and much riskier when they outspeed us and can hit back before we act.
   // How much that risk matters depends on the mode — when ahead we avoid the
   // bad trade, when behind we accept it to take the swing.
+  // Priority beats Speed: if their active holds a revealed priority move that
+  // can KO us, "we outspeed" doesn't save the KO — they strike first. And a
+  // priority move of OUR OWN lands its KO even when they're faster. Both
+  // override the plain Speed read below.
+  const ourPrio = movePriority(gen, moveName, field);
+  const theirPrio = bestPriorityMove(theirTarget, attacker, gen, field, calcOpts);
+  const ourHp = attacker.hpPercent ?? 100;
+  const theirPrioKO = !!theirPrio && theirPrio.max >= ourHp;
   let speedNote = null;
   if (speed) {
     if (speed.weMoveFirst === true && ko) {
-      score += r.koFirstBonus;
-      speedNote = 'you outspeed — safe to go for the KO';
+      // We're faster — the KO is safe unless their priority move jumps the
+      // queue and finishes us first.
+      if (theirPrioKO && ourPrio < theirPrio.priority) {
+        score -= r.koedFirstPenalty;
+        speedNote = `you outspeed, but their ${theirPrio.move} can KO you first (priority)`;
+      } else {
+        score += r.koFirstBonus;
+        speedNote = 'you outspeed — safe to go for the KO';
+      }
     } else if (speed.weMoveFirst === false) {
       const theirDmg = incomingPercent(theirTarget, attacker, gen, field, calcOpts).pct;
-      const ourHp = attacker.hpPercent ?? 100;
-      if (theirDmg >= ourHp) {
+      // Our priority move strikes before their Speed advantage — the KO lands.
+      if (ko && ourPrio > 0 && ourPrio >= (theirPrio?.priority ?? 1)) {
+        score += r.koFirstBonus;
+        speedNote = `they outspeed you, but ${moveName} has priority — you strike first`;
+      } else if (theirPrioKO) {
+        score -= r.koedFirstPenalty;
+        speedNote = `their ${theirPrio.move} can KO you first (priority beats Speed)`;
+      } else if (theirDmg >= ourHp) {
         score -= r.koedFirstPenalty;
         speedNote = `they outspeed and can KO you first (~${round1(theirDmg)}%)`;
       } else if (theirDmg >= 40) {
         score -= r.outspeedHitPenalty;
         speedNote = `they outspeed — expect ~${round1(theirDmg)}% back before you move`;
       }
+    } else if (theirPrioKO) {
+      // Speed is a toss-up, but their priority move isn't: it acts first
+      // either way and can finish us.
+      score -= r.koedFirstPenalty;
+      speedNote = `their ${theirPrio.move} can KO you first (priority)`;
     }
   }
 
@@ -492,8 +559,14 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
   const seHits = benchDmg.filter((b) => b.eff >= 2).map((b) => b.ident.split(': ')[1]).slice(0, 2);
   const parts = [`~${vsTarget.mean}% vs ${theirTarget.species}`];
   if (effText) parts.push(effText);
+  // Foul Play runs off the TARGET's Attack — the calc already prices that in
+  // (the defender's Atk feeds the damage), but the note makes the read
+  // explicit: it's a physical-attacker answer, weak against special walls.
+  if (moveName === 'Foul Play') parts.push('uses their Attack');
+  if (sashAlive) parts.push('their Focus Sash survives it (1 HP) — chip it first');
   if (ko) parts.push(koGuaranteed ? 'guaranteed KO' : chip < 0 ? 'can KO (chip finishes it)' : 'can KO');
   if (speedNote) parts.push(speedNote);
+  if (wpNote) parts.push(wpNote);
   if (seHits.length) parts.push(`also hits ${seHits.join(', ')} super effectively`);
   const note = `${moveName}: ${parts.join(' · ')}`;
 
@@ -526,6 +599,27 @@ export function incomingPercent(theirActive, target, gen, field, calcOpts = {}) 
     }
   }
   return { pct: max, move };
+}
+
+// The strongest revealed priority move `mon` has against `target` (highest
+// mean damage), or null when it has none. Priority moves act before normal
+// ones regardless of Speed — so a revealed Aqua Jet/Sucker Punch/Extreme
+// Speed on their active means an "outspeeding" KO call is NOT safe, and a
+// priority move of ours can steal a KO we'd otherwise lose to their Speed.
+// Field-aware (Grassy Glide only counts on Grassy Terrain).
+export function bestPriorityMove(mon, target, gen, field, calcOpts = {}) {
+  if (!mon?.moves?.length || !target?.species) return null;
+  let best = null;
+  for (const moveName of mon.moves) {
+    const prio = movePriority(gen, moveName, field);
+    if (prio <= 0) continue;
+    const d = damagePercent(gen, mon, target, moveName, field, calcOpts);
+    if (!d || d.category === 'Status' || d.max <= 0) continue;
+    if (!best || d.mean > best.pct) {
+      best = { move: moveName, pct: d.mean, max: d.max, priority: prio };
+    }
+  }
+  return best;
 }
 
 // Best damaging move `attacker` has against `target` (by mean damage), with
@@ -648,16 +742,45 @@ export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, ca
     note += `; their ${theirActive?.species} could hit ${ourActive.species} with ${nowPot.move} (~${round1(nowPot.pct)}%)`;
   }
 
+  // Their active is a setup threat: a revealed setup move it hasn't used yet
+  // means switching hands it the free turn it needs to boost. If the
+  // candidate can't even wall the CURRENT threat (still eating a big hit),
+  // the switch just delays the sweep — nudge it down.
+  const theirSetupMove = (theirActive?.moves ?? []).find((m) => SETUP_MOVES.has(m));
+  if (theirSetupMove && !(theirActive?.boosts?.atk || theirActive?.boosts?.spa)) {
+    if (cand.pct >= 40) {
+      net -= 4;
+      note += `; their ${theirActive.species} has ${theirSetupMove} — switching gives it a free turn to set up`;
+    }
+  }
+
   // Speed awareness: an incoming mon that outspeeds their active gets to act
   // first (much safer); one that's outsped while taking heavy damage is risky.
+  // Priority overrides the speed read entirely: their revealed priority move
+  // can pick the candidate off before it acts no matter how fast it is, and
+  // the candidate's own priority move can steal the KO when outsped.
   if (speedCtx?.state && theirActive) {
+    const theirPrio = bestPriorityMove(theirActive, candidate, gen, field, calcOpts);
+    const candPrio = bestPriorityMove(candidate, theirActive, gen, field, calcOpts);
+    const candHp = candidate.hpPercent ?? 100;
+    const theirPrioKo = theirPrio && theirPrio.max >= candHp;
+    const candPrioKo = candPrio && candPrio.max >= (theirActive?.hpPercent ?? 100);
     const order = speedOrder(candidate, theirActive, speedCtx.state.gen ?? gen, speedCtx.state, speedCtx.ourSideId);
-    if (order.weMoveFirst === true) {
+    if (theirPrioKo) {
+      net -= 8;
+      note += `; but their ${theirActive.species}'s ${theirPrio.move} can KO ${candidate.species} before it acts (priority)`;
+    } else if (candPrioKo) {
+      net += 5;
+      note += `; ${candidate.species}'s ${candPrio.move} can KO their ${theirActive.species} first (priority)`;
+    } else if (order.weMoveFirst === true) {
       net += 5;
       note += `; ${candidate.species} outspeeds their ${theirActive.species} — moves first`;
     } else if (order.weMoveFirst === false && cand.pct >= 40) {
       net -= 8;
       note += `; but their ${theirActive.species} outspeeds ${candidate.species} — it hits first`;
+    } else if (theirPrio && theirPrio.pct >= 40) {
+      net -= 6;
+      note += `; their ${theirActive.species}'s ${theirPrio.move} hits ${candidate.species} for ~${round1(theirPrio.pct)}% before it acts (priority)`;
     }
   }
   // If their species could know a hidden move that mauls this candidate, say
@@ -724,6 +847,34 @@ export function bestSwitchIn(ourTeam, theirActive, gen, field, profile = null, c
     }
   }
   return best;
+}
+
+// ---------------------------------------------------------------------------
+// 2-turn lookahead (the race projection)
+// ---------------------------------------------------------------------------
+
+// Rough projection of how many turns each active takes to finish the other,
+// counting their best hit (revealed + discounted hidden) against us, our chip
+// drain per turn (burn/poison/weather), and the same for them. Returns null
+// when neither side can realistically finish the other. Used to call out
+// races the player is losing: "they finish you in 2 turns — win now or
+// switch".
+export function raceProjection(ourActive, theirActive, gen, field, calcOpts = {}, ourSide = null) {
+  if (!ourActive?.species || !theirActive?.species) return null;
+  const theirHit = effectiveIncoming(theirActive, ourActive, gen, field, calcOpts);
+  const ourHit = ownBestDamage(ourActive, theirActive, gen, field, calcOpts);
+  const ourHp = ourActive.hpPercent ?? 100;
+  const theirHp = theirActive.hpPercent ?? 100;
+  const ourChip = chipPerTurn(ourActive, gen, field); // negative = drain
+  const theirChip = chipPerTurn(theirActive, gen, field);
+  const ourDrain = ourChip < 0 ? -ourChip : 0;
+  const theirDrain = theirChip < 0 ? -theirChip : 0;
+  const theirDps = round1(theirHit + ourDrain); // what we lose per turn staying
+  const ourDps = round1(ourHit + theirDrain); // what they lose per turn
+  const ourTurns = theirDps > 0 ? Math.ceil(ourHp / theirDps) : Infinity;
+  const theirTurns = ourDps > 0 ? Math.ceil(theirHp / ourDps) : Infinity;
+  if (ourTurns === Infinity && theirTurns === Infinity) return null;
+  return { ourTurns, theirTurns, theirHit: round1(theirHit), ourHit: round1(ourHit), ourDrain };
 }
 
 // ---------------------------------------------------------------------------
@@ -942,8 +1093,21 @@ export function endgameLocks(ourTeam, theirTeam, gen, field, calcOpts = {}, stat
       const theirTurns = theirDmg > 0 ? Math.ceil(ourHp / theirDmg) : Infinity;
       const order = state ? speedOrder(ours, theirs, gen, state, ourSideId) : null;
       const weFirst = order?.weMoveFirst === true;
+      // Priority moves act before normal ones regardless of Speed: a revealed
+      // priority KO on either side decides the duel outright (their Aqua Jet
+      // finishes us before our faster move lands — and vice versa).
+      const theirPrioKo = (() => {
+        const p = bestPriorityMove(theirs, ours, gen, field, calcOpts);
+        return p && p.max >= ourHp ? p.move : null;
+      })();
+      const ourPrioKo = (() => {
+        const p = bestPriorityMove(ours, theirs, gen, field, calcOpts);
+        return p && p.max >= theirHp ? p.move : null;
+      })();
       let verdict;
-      if (ourDmg <= 0 && theirDmg > 0) verdict = 'lose';
+      if (theirPrioKo) verdict = 'lose';
+      else if (ourPrioKo) verdict = 'win';
+      else if (ourDmg <= 0 && theirDmg > 0) verdict = 'lose';
       else if (theirDmg <= 0 && ourDmg > 0) verdict = 'win';
       else if (ourTurns === Infinity && theirTurns === Infinity) verdict = 'stall';
       else if (ourTurns < theirTurns) verdict = 'win';
@@ -955,6 +1119,7 @@ export function endgameLocks(ourTeam, theirTeam, gen, field, calcOpts = {}, stat
         ourTurns: ourTurns === Infinity ? null : ourTurns,
         theirTurns: theirTurns === Infinity ? null : theirTurns,
         weFirst,
+        priority: theirPrioKo ? 'theirs' : ourPrioKo ? 'ours' : null,
         verdict,
       });
     }
@@ -1066,6 +1231,12 @@ export function recommend(state, opts = {}) {
     // Speed ordering only makes sense against their actual active — against a
     // predicted switch-in the match-up could change entirely.
     reasoning.push(speedLine(ourActive, theirTarget, gen, state, ourSideId));
+    // A revealed priority move on their active ignores the Speed read above:
+    // if it can pick us off first, the outspeed line doesn't apply to it.
+    const prioThreat = bestPriorityMove(theirTarget, ourActive, gen, field, calcOpts);
+    if (prioThreat && prioThreat.max >= (ourActive.hpPercent ?? 100)) {
+      reasoning.push(`⚠ their ${theirTarget.species}'s ${prioThreat.move} can KO you first — priority beats Speed.`);
+    }
   }
 
   const bench = ourTeam.filter((m) => m.ident !== ourActive.ident);
@@ -1161,12 +1332,12 @@ export function recommend(state, opts = {}) {
     if (ourWins.length) {
       const w = ourWins[0];
       reasoning.push(
-        `Endgame: your ${w.ours} beats their ${w.theirs} 1v1 (${w.ourTurns}HKO vs their ${w.theirTurns}HKO${w.weFirst ? ', you move first' : ''}) — locked in.`
+        `Endgame: your ${w.ours} beats their ${w.theirs} 1v1 (${w.ourTurns}HKO vs their ${w.theirTurns}HKO${w.weFirst && w.priority !== 'ours' ? ', you move first' : ''}${w.priority === 'ours' ? ' — priority KO' : ''}) — locked in.`
       );
     }
     if (theirWins.length && !ourWins.some((w) => w.theirs === theirWins[0].theirs)) {
       const l = theirWins[0];
-      reasoning.push(`Endgame: their ${l.theirs} beats your ${l.ours} 1v1 — avoid that pairing.`);
+      reasoning.push(`Endgame: their ${l.theirs} beats your ${l.ours} 1v1${l.priority === 'theirs' ? ' (priority KO)' : ''} — avoid that pairing.`);
     }
   }
   // Win-condition read: who ends the game for each side.
@@ -1186,6 +1357,92 @@ export function recommend(state, opts = {}) {
   const ourWincon = teamWincon(ourTeam, theirTeam, gen, field, calcOpts);
   if (ourWincon && ourWincon.mon.ident !== ourActive.ident && ourTeam.length > 1) {
     reasoning.push(`Your ${ourWincon.mon.species} is your win condition — keep it out of danger.`);
+  }
+
+  // Their setup prediction: a revealed setup move on their active that it
+  // hasn't used yet is a boost-incoming — pros set up on the switch-in. If
+  // our best move can KO it now, that's the moment; otherwise it sweeps.
+  if (theirTarget && !targetIsPredicted) {
+    const theirSetup = (theirTarget.moves ?? []).find((m) => SETUP_MOVES.has(m));
+    const boosted = (theirTarget.boosts?.atk ?? 0) >= 1 || (theirTarget.boosts?.spa ?? 0) >= 1;
+    if (theirSetup && !boosted) {
+      if (bestMove?.ko) {
+        reasoning.push(`Their ${theirTarget.species} has ${theirSetup} revealed — KO it NOW before it sets up.`);
+      } else {
+        reasoning.push(`Their ${theirTarget.species} has ${theirSetup} — it's about to set up. KO it now or switch before it sweeps.`);
+      }
+    }
+  }
+
+  // 2-turn lookahead: if they finish us faster than we finish them, staying is
+  // a slow loss — call the race so the play (KO now, status, or switch) gets
+  // made before the projection comes due.
+  if (theirTarget && !targetIsPredicted) {
+    const race = raceProjection(ourActive, theirTarget, gen, field, calcOpts, ourSide);
+    if (race && race.ourTurns <= 2 && race.theirTurns > race.ourTurns && !bestMove?.ko) {
+      const chipNote = race.ourDrain > 0 ? ` (incl. ~${round1(race.ourDrain)}%/turn chip)` : '';
+      reasoning.push(
+        `Race check: their ${theirTarget.species} finishes you in ~${race.ourTurns} turn${race.ourTurns === 1 ? '' : 's'} at ~${race.theirHit}%/turn${chipNote} — you can't outlast it; win this turn or switch.`
+      );
+    }
+  }
+
+  // Tera awareness.
+  if (theirTarget?.terastallized) {
+    reasoning.push(`Their ${theirTarget.species} is terastallized (tera ${theirTarget.teraType}) — effectiveness above accounts for it.`);
+  }
+  // Their revealed-but-unused tera type can flip OUR matchup: it may resist
+  // the move we're about to click, and their hits on us can jump with the new
+  // typing. Warn so the plan holds the tera.
+  if (theirTarget?.teraType && !theirTarget.terastallized && !targetIsPredicted) {
+    const t = theirTarget.teraType;
+    const flips = [];
+    if (bestMove && bestMove.kind === 'damage') {
+      const dNow = bestMove.expected.mean;
+      const dTera = damagePercent(gen, ourActive, theirTarget, bestMove.move, field, {
+        ...calcOpts,
+        defenderTera: t,
+      })?.mean;
+      if (dTera != null && dTera < dNow - 15) {
+        flips.push(`your ${bestMove.move} drops ~${round1(dNow)}% → ~${round1(dTera)}%`);
+      }
+    }
+    const tInNow = incomingPercent(theirTarget, ourActive, gen, field, calcOpts).pct;
+    const tInTera = incomingPercent(theirTarget, ourActive, gen, field, { ...calcOpts, attackerTera: t }).pct;
+    if (tInTera > tInNow + 15) {
+      flips.push(`their hits on you rise ~${round1(tInNow)}% → ~${round1(tInTera)}%`);
+    }
+    if (flips.length) {
+      reasoning.push(`Their ${theirTarget.species} can terastallize into ${t}: ${flips.join('; ')} — plan around it.`);
+    }
+  }
+  if (ourActive.canTera && ourActive.teraType && !ourActive.terastallized) {
+    const tera = ourActive.teraType;
+    const gains = [];
+    if (bestMove && bestMove.kind === 'damage') {
+      const dNow = bestMove.expected.mean;
+      const dTera = damagePercent(gen, ourActive, theirTarget, bestMove.move, field, {
+        ...calcOpts,
+        attackerTera: tera,
+      })?.mean;
+      if (dTera != null && dTera > dNow + 8) {
+        gains.push(`tera-${tera} boosts ${bestMove.move} ~${round1(dNow)}% → ~${round1(dTera)}%`);
+      }
+    }
+    const inNow = incomingPercent(theirTarget, ourActive, gen, field, calcOpts).pct;
+    const inTera = incomingPercent(theirTarget, ourActive, gen, field, { ...calcOpts, defenderTera: tera }).pct;
+    const ourHp = ourActive.hpPercent ?? 100;
+    // The "flip the matchup" read: their hit KOs us and tera makes us
+    // survive it — that's the moment to press the button, not a marginal
+    // damage trade. (Also catches the plain damage-cut case below.)
+    if (inNow >= ourHp && inTera < ourHp) {
+      gains.push(`tera-${tera} turns their ~${round1(inNow)}% hit into ~${round1(inTera)}% — you survive it`);
+    } else if (inTera < inNow - 20) {
+      gains.push(`tera-${tera} cuts incoming damage ~${round1(inNow)}% → ~${round1(inTera)}%`);
+    }
+    if (gains.length) {
+      reasoning.push(`Consider terastallizing your ${ourActive.species} into ${tera}: ${gains.join('; ')}.`);
+    }
   }
 
   // Risk-mode callout: who's ahead, and how that shapes the recommendation.
@@ -1219,33 +1476,6 @@ export function recommend(state, opts = {}) {
   }
 
   if (switchTo) reasoning.push(switchTo.note);
-
-  // Tera awareness.
-  if (theirTarget?.terastallized) {
-    reasoning.push(`Their ${theirTarget.species} is terastallized (tera ${theirTarget.teraType}) — effectiveness above accounts for it.`);
-  }
-  if (ourActive.canTera && ourActive.teraType && !ourActive.terastallized) {
-    const tera = ourActive.teraType;
-    const gains = [];
-    if (bestMove && bestMove.kind === 'damage') {
-      const dNow = bestMove.expected.mean;
-      const dTera = damagePercent(gen, ourActive, theirTarget, bestMove.move, field, {
-        ...calcOpts,
-        attackerTera: tera,
-      })?.mean;
-      if (dTera != null && dTera > dNow + 8) {
-        gains.push(`tera-${tera} boosts ${bestMove.move} ~${round1(dNow)}% → ~${round1(dTera)}%`);
-      }
-    }
-    const inNow = incomingPercent(theirTarget, ourActive, gen, field, calcOpts).pct;
-    const inTera = incomingPercent(theirTarget, ourActive, gen, field, { ...calcOpts, defenderTera: tera }).pct;
-    if (inTera < inNow - 20) {
-      gains.push(`tera-${tera} cuts incoming damage ~${round1(inNow)}% → ~${round1(inTera)}%`);
-    }
-    if (gains.length) {
-      reasoning.push(`Consider terastallizing your ${ourActive.species} into ${tera}: ${gains.join('; ')}.`);
-    }
-  }
 
   // Their best revealed move's damage on us — the same number the matchup
   // view's Damage row shows (both come from matchupDamage), so the panel and

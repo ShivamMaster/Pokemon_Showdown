@@ -2,6 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { Field } from '@smogon/calc';
 import { createBattleState, createPokemon, addMove } from '../src/reader/state.js';
 import { buildField } from '../src/engine/calc.js';
 import {
@@ -9,6 +10,7 @@ import {
   speedOrder,
   speedLine,
   findSpeedEvidence,
+  movePriority,
 } from '../src/engine/speed.js';
 import {
   evaluateMove,
@@ -16,6 +18,8 @@ import {
   recommend,
   incomingPercent,
   ownBestDamage,
+  bestPriorityMove,
+  endgameLocks,
 } from '../src/engine/recommend.js';
 
 // ---------------------------------------------------------------------------
@@ -555,6 +559,84 @@ test('speed: a switch-in that is outsped while taking heavy damage is penalized'
   if (res) {
     assert.match(res.note, /but their Deoxys-Speed outspeeds Ferrothorn — it hits first/);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Priority-move awareness (priority beats Speed in KO calls and switches)
+// ---------------------------------------------------------------------------
+
+test('priority: movePriority reads the calc table, Grassy Glide only on Grassy', () => {
+  assert.equal(movePriority(9, 'Aqua Jet'), 1);
+  assert.equal(movePriority(9, 'Extreme Speed'), 2);
+  assert.equal(movePriority(9, 'Fire Blast'), 0);
+  assert.equal(movePriority(9, 'Grassy Glide', new Field({ terrain: 'Grassy' })), 1);
+  assert.equal(movePriority(9, 'Grassy Glide', new Field()), 0);
+});
+
+test('priority: bestPriorityMove finds the revealed priority threat', () => {
+  const scizor = makeMon('Scizor', { moves: ['Bullet Punch', 'Knock Off'] });
+  const rill = makeMon('Rillaboom');
+  const p = bestPriorityMove(scizor, rill, 9, new Field());
+  assert.equal(p.move, 'Bullet Punch');
+  assert.equal(p.priority, 1);
+  // A mon with no priority moves has no priority threat.
+  const ferro = makeMon('Ferrothorn', { moves: ['Gyro Ball'] });
+  assert.equal(bestPriorityMove(ferro, rill, 9, new Field()), null);
+});
+
+test('priority: a revealed priority KO on their side cancels the safe-KO bonus', () => {
+  const field = new Field();
+  // We outspeed, our move KOs — but their Extreme Speed KOs us first.
+  const us = makeMon('Deoxys-Speed', { hpPercent: 25, moves: ['Psycho Boost'] });
+  const them = makeMon('Dragonite', { hpPercent: 15, moves: ['Extreme Speed'] });
+  const withSpeed = evaluateMove(us, 'Psycho Boost', them, [them], 1, {}, 9, field, {}, { weMoveFirst: true });
+  const without = evaluateMove(us, 'Psycho Boost', them, [them], 1, {}, 9, field, {}, null);
+  // Without priority awareness the outspeed would earn a bonus; with it, the
+  // priority KO threat turns the safe KO into a losing trade.
+  assert.ok(withSpeed.score < without.score, `priority KO should outweigh outspeed, ${withSpeed.score} vs ${without.score}`);
+  assert.match(withSpeed.note, /Extreme Speed can KO you first \(priority\)/);
+});
+
+test('priority: our priority move lands the KO even when they outspeed us', () => {
+  const field = new Field();
+  // They're faster, but our Ice Shard (4× on Garchomp) finishes it first.
+  const us = makeMon('Mamoswine', { moves: ['Ice Shard'] });
+  const them = makeMon('Garchomp', { hpPercent: 60, moves: ['Earthquake'] });
+  const withSpeed = evaluateMove(us, 'Ice Shard', them, [them], 1, {}, 9, field, {}, { weMoveFirst: false });
+  const without = evaluateMove(us, 'Ice Shard', them, [them], 1, {}, 9, field, {}, null);
+  assert.ok(withSpeed.score > without.score, 'priority KO while outsped should be rewarded');
+  assert.match(withSpeed.note, /Ice Shard has priority — you strike first/);
+});
+
+test('priority: a switch-in their priority move can KO loses the speed reward', () => {
+  const state = baseState();
+  const field = buildField(state);
+  // The candidate actually outspeeds Scizor, but Scizor's Bullet Punch KOs
+  // the low-HP candidate before it acts — the "moves first" read must give
+  // way to the priority threat.
+  const ourActive = makeMon('Deoxys-Speed', { moves: ['Psycho Boost'] });
+  const candidate = makeMon('Rillaboom', { hpPercent: 10, moves: ['Wood Hammer'] });
+  const theirActive = makeMon('Scizor', { moves: ['Bullet Punch', 'Knock Off'] });
+  assert.ok(speedOrder(candidate, theirActive, 9, state, 'p1').weMoveFirst !== false);
+
+  const speedCtx = { state, ourSideId: 'p1' };
+  const res = evaluateSwitch(ourActive, candidate, theirActive, 9, field, {}, speedCtx);
+  assert.ok(res, 'the switch should still be evaluated');
+  assert.match(res.note, /Bullet Punch can KO Rillaboom before it acts \(priority\)/);
+  assert.ok(!/moves first/.test(res.note), 'the outspeed reward must not apply');
+});
+
+test('priority: endgame 1v1 is decided by their priority KO despite our speed', () => {
+  const state = baseState();
+  // We'd win on turns and speed — but their Extreme Speed KOs us first.
+  const ours = makeMon('Rillaboom', { hpPercent: 20, moves: ['Wood Hammer'] });
+  ours.ident = 'p1a: Rillaboom';
+  const theirs = makeMon('Dragonite', { hpPercent: 5, moves: ['Extreme Speed'] });
+  theirs.ident = 'p2a: Dragonite';
+  const locks = endgameLocks([ours], [theirs], 9, new Field(), {}, state, 'p1');
+  const lock = locks.find((l) => l.ours === 'Rillaboom' && l.theirs === 'Dragonite');
+  assert.equal(lock.verdict, 'lose');
+  assert.equal(lock.priority, 'theirs');
 });
 
 // ---------------------------------------------------------------------------

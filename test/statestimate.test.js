@@ -194,6 +194,68 @@ test('evLabel: only reports narrowed stats', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Foul Play: the move runs off the TARGET's Attack, so the hit is evidence
+// about the defender's investment — never the attacker's
+// ---------------------------------------------------------------------------
+
+// A Foul Play matchup: Umbreon (weak Atk, 65 base) vs Garchomp (strong
+// physical attacker, 130 base Atk).
+function makeFoulPlayMatchup() {
+  const state = createBattleState();
+  state.gen = 9;
+  state.gametype = 'singles';
+  const atk = createPokemon({ ident: 'p1a: Umbreon', side: 'p1', species: 'Umbreon', level: 100 });
+  addMove(atk, 'Foul Play');
+  const def = createPokemon({ ident: 'p2a: Garchomp', side: 'p2', species: 'Garchomp', level: 100 });
+  state.sides.p1.pokemon.push(atk);
+  state.sides.p2.pokemon.push(def);
+  return { state, atk, def };
+}
+
+test('damagePercent: Foul Play assumes the TARGET is Atk-invested (not the user)', () => {
+  const { atk, def } = makeFoulPlayMatchup();
+  // The default calc must price the defender's Atk at the standard 252-EV
+  // investment (it's the attack source), not the user's irrelevant Atk.
+  const dDefault = damagePercent(9, atk, def, 'Foul Play', new Field());
+  const dZero = damagePercent(9, atk, def, 'Foul Play', new Field(), {
+    defenderEvs: { hp: 252, def: 252, atk: 0 },
+  });
+  const dMax = damagePercent(9, atk, def, 'Foul Play', new Field(), {
+    defenderEvs: { hp: 252, def: 252, atk: 252 },
+  });
+  assert.equal(dDefault.mean, dMax.mean, 'default = defender at 252 Atk EV');
+  assert.ok(dDefault.mean > dZero.mean, 'assumed investment deals more than base Atk');
+});
+
+test('damagePercent: Foul Play vs a frail special attacker is the real read', () => {
+  const { atk } = makeFoulPlayMatchup();
+  const gengar = createPokemon({ ident: 'p2b: Gengar', side: 'p2', species: 'Gengar', level: 100 });
+  const d = damagePercent(9, atk, gengar, 'Foul Play', new Field());
+  assert.ok(d.mean > 55, `Foul Play should chunk Gengar, got ${d.mean}%`);
+});
+
+test('applyObservation: a Foul Play hit is evidence about the DEFENDER, never the attacker', () => {
+  const { state, atk, def } = makeFoulPlayMatchup();
+  // Mid-roll hit on a standard invested Garchomp (252 Atk / 252 Def).
+  const d = damagePercent(9, atk, def, 'Foul Play', new Field(), {
+    defenderEvs: { hp: 252, def: 252, atk: 252 },
+    useEstimates: false,
+  });
+  const mid = Math.round(((d.min + d.max) / 2) * 10) / 10;
+  applyObservation(state, { attacker: atk.ident, defender: def.ident, move: 'Foul Play', damagePct: mid, turn: 1 });
+  applyObservation(state, { attacker: atk.ident, defender: def.ident, move: 'Foul Play', damagePct: mid, turn: 2 });
+  // The attacker's stats don't power Foul Play — Umbreon's weak Atk must NOT
+  // be "learned" from this hit (the pre-fix behavior).
+  assert.equal(atk.evEstimate, null, 'attacker gets no estimate from Foul Play');
+  // The defender's Atk (the attack source) and Def both narrow toward
+  // investment — the estimate must exist and imply a bulky physical attacker.
+  assert.ok(def.evEstimate?.atk, 'defender Atk estimate should exist');
+  assert.ok(def.evEstimate?.def, 'defender Def estimate should exist');
+  assert.ok(def.evEstimate.atk[1] >= 200, `invested Garchomp, got atk ${def.evEstimate.atk}`);
+  assert.ok(def.evEstimate.def[1] >= 200, `invested Garchomp, got def ${def.evEstimate.def}`);
+});
+
+// ---------------------------------------------------------------------------
 // buildPokemon consumes the learned EVs
 // ---------------------------------------------------------------------------
 

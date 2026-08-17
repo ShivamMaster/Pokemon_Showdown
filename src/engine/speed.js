@@ -9,7 +9,29 @@
 // modifiers the reader does know: boost stages, paralysis, Choice Scarf,
 // weather-based speed abilities, Tailwind, and Trick Room.
 
-import { Pokemon, SPECIES } from '@smogon/calc';
+import { Pokemon, SPECIES, MOVES } from '@smogon/calc';
+
+// Priority data the calc is missing: Grassy Glide is +1 priority, but ONLY in
+// Grassy Terrain (the calc table doesn't record the conditional).
+const PRIORITY_OVERRIDES = { 'Grassy Glide': 1 };
+
+// A move's priority bracket (0 = normal). Priority decides turn order within
+// the same Speed comparison: a +1 move (Aqua Jet, Sucker Punch) acts before a
+// 0 move no matter how fast either side is; +2 (Extreme Speed) beats +1, etc.
+// Field-aware so Grassy Glide only counts while Grassy Terrain is up.
+export function movePriority(gen, moveName, field = null) {
+  const override = PRIORITY_OVERRIDES[moveName];
+  if (override != null) {
+    // Grassy Glide is +1 only on Grassy Terrain — off it, it's a normal move.
+    if (moveName === 'Grassy Glide' && field?.terrain !== 'Grassy') return 0;
+    return override;
+  }
+  try {
+    return MOVES[String(gen)]?.[moveName]?.priority ?? 0;
+  } catch {
+    return 0;
+  }
+}
 
 // Abilities that double Speed in a specific weather/terrain.
 const SPEED_ABILITIES = {

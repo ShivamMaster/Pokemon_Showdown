@@ -7,3 +7,6 @@ extension/icons/
 
 # Local profile backups (download the txt export from the options page here)
 exports/
+
+# Session memory / handoff file (paste into a new session to resume)
+SESSION_CONTEXT.md
