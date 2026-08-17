@@ -130,12 +130,33 @@ best move, built in stages:
   revealed **Weakness Policy** that your super-effective click would trigger
   is priced into the move ("⚠ Ice Beam triggers their Weakness Policy —
   their Dragonite gets +2 and hits for ~101%") — unless the move KOs, since
-  a faint can't boost.
+  a faint can't boost. The same reads show inline in the matchup **Damage
+  row** ("⚠ their Focus Sash survives it" / "⚠ triggers their Weakness
+  Policy (+2)"), so they're visible at a glance without opening the
+  reasoning.
 - **2-turn race projection** (`raceProjection`) — hazard + chip + speed
   formalized into a simple race: when they finish you in ≤2 turns and you
   can't finish them first, the reasoning calls it: "Race check: their
   Garchomp finishes you in ~1 turn at ~46%/turn — you can't outlast it; win
-  this turn or switch".
+  this turn or switch". The race runs on their **full worst-case hidden
+  move** (not the discounted 0.6× used elsewhere — a survival projection
+  plans for the strongest move they COULD have), and names it when it's the
+  driver: "Race check: their Garchomp finishes you in ~1 turn at
+  ~107.6%/turn (includes likely Brick Break ~107.6%) — …"
+- **Physical/special EV inference** (`inferOffensiveStat`) — a mon that has
+  revealed mostly physical damaging moves (≥2, at least 3× the special
+  count) is almost certainly Atk-invested; mostly special moves →
+  SpA-invested. The bias fills the gap before damage observations narrow the
+  EVs: a known physical attacker's unrevealed special coverage is priced at
+  ~0 SpA instead of 252 (a physical Garchomp's hidden Fire Blast is a
+  coverage tick, not a nuke), and Foul Play against a known special
+  attacker runs off its near-zero Atk. Mixed (2-2), single-move, or
+  unknown sets stay un-inferred — and the reasoning calls out the read:
+  "their Garchomp reads as a physical attacker … and Foul Play would punish
+  it". The matchup stat rows surface it visually too: the invested stat
+  (Atk for physical, SpA for special) gets a subtle ✦ tint and a tooltip
+  ("Revealed moves read physical — Atk is likely invested (252 EV)"), so
+  the read is visible at a glance without opening the reasoning.
 
 ## Stage 8: pixel OCR fallback
 
@@ -629,17 +650,25 @@ captured from a real battle page and parses identically.
     "their Focus Sash survives it (1 HP) — chip it first"; a super-effective
     click into a revealed Weakness Policy prices in the +2 counter ("⚠ Ice
     Beam triggers their Weakness Policy — their Dragonite gets +2 and hits
-    for ~101%") unless the move KOs (a faint can't boost).
+    for ~101%") unless the move KOs (a faint can't boost). Both reads also
+    show inline in the matchup Damage row.
   - **2-turn race projection** (`raceProjection`): hazard + chip + speed
     formalized into a race — when they finish you in ≤2 turns and you can't
     finish them first, the reasoning calls it ("Race check: their Garchomp
     finishes you in ~1 turn at ~46%/turn — you can't outlast it; win this
-    turn or switch").
+    turn or switch"). The race uses their full worst-case hidden move and
+    names it when it drives the number.
   - **Foul Play** (see Stage 14): `damagePercent` puts the 252-EV attacker
     assumption on the DEFENDER's Atk for Foul Play (that's the stat the move
     runs off), the stat estimator attributes observed Foul Play hits to the
     defender's Atk/Def instead of the attacker's, and the move note says
     "uses their Attack".
+  - **Physical/special EV inference** (`inferOffensiveStat`): revealed move
+    categories bias the default EV assumption before damage observations
+    narrow it — a mostly-physical moveset prices hidden special moves at ~0
+    SpA and makes Foul Play hit harder, a mostly-special one prices hidden
+    physical moves at ~0 Atk and makes Foul Play hit soft. Mixed or
+    single-move sets stay un-inferred.
 - **Active-matchup view** — the panel shows your lead vs their lead side by
   side: HP, all five stats (exact for you, estimated ranges for them that
   narrow with learned EVs / hovered Spe), item, and ability, with the
@@ -779,7 +808,10 @@ extension, and the E2E checks the live panel, profile recording, a
 hover-tooltip observation (PP appears in the panel), persistence across a
 page reload, the options page, the popup, **real tab capture** (start →
 frames increment → stop), **the OCR fallback** (DOM tooltip suppressed,
-pixel tooltip read, PP appears in the panel), and the live panel toggle.
+pixel tooltip read, PP appears in the panel), the live panel toggle,
+compact mode, and the **item-condition notes in the Damage row** (a fed
+matchup with a revealed Focus Sash / Weakness Policy must show the "survives
+it" / "triggers +2" warnings inline).
 
 Tests cover a real 22-turn Gen 9 OU battle (`test/fixtures/real-battle.log`,
 fetched from Showdown replays) plus hand-crafted edge cases.

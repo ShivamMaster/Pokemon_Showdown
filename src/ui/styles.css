@@ -746,6 +746,13 @@
   color: var(--psa-muted);
 }
 
+/* Item-condition callouts in the matchup Damage row (Focus Sash / Weakness
+   Policy) — amber like the other warnings so they read as a caution, not a
+   stat. */
+.psa-warn {
+  color: var(--psa-warn);
+}
+
 /* Per-card predicted-damage comparison (You box switch candidates). */
 .psa-card-vs {
   font-size: 10.5px;
@@ -865,6 +872,23 @@
 .psa-match-lose {
   color: #5f6673;
   opacity: 0.85;
+}
+
+/* Physical/special EV inference on the matchup stat rows: a subtle accent
+   tint on the invested stat (Atk for physical attackers, SpA for special)
+   — the revealed move categories say where the EVs almost certainly went. */
+.psa-match-invest {
+  background: rgba(122, 162, 247, 0.14);
+  border-radius: 3px;
+  position: relative;
+}
+
+.psa-match-invest::after {
+  content: '✦';
+  color: var(--psa-accent);
+  font-size: 8px;
+  margin-left: 3px;
+  vertical-align: super;
 }
 
 .psa-match-row-spe td {

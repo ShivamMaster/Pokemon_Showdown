@@ -1,5 +1,5 @@
 // src/engine/index.js
-export { damagePercent, buildField, buildPokemon, effectivenessOf, round1 } from './calc.js';
+export { damagePercent, buildField, buildPokemon, effectivenessOf, round1, inferOffensiveStat } from './calc.js';
 export {
   applyObservation,
   applyObservations,

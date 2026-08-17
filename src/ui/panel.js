@@ -9,7 +9,7 @@
 // plug into the recommendation slot later via opts.recommendation.
 
 import { Pokemon, Move } from '@smogon/calc';
-import { buildField, buildPokemon, damagePercent, effectivenessOf } from '../engine/calc.js';
+import { buildField, buildPokemon, damagePercent, effectivenessOf, inferOffensiveStat } from '../engine/calc.js';
 import { topPotentialMoves } from '../engine/movepool.js';
 import { matchupDamage } from '../engine/recommend.js';
 import { speedLine } from '../engine/speed.js';
@@ -243,6 +243,10 @@ export function buildPanelModel(state, opts = {}) {
       hiddenCount: hidden,
       observed: !!mon.observed,
       evLabel: evLabelOf(mon),
+      // Physical/special EV inference from revealed move categories: 'atk'
+      // (mostly physical moves → Atk-invested), 'spa', or null (mixed / too
+      // little evidence). Surfaced on the matchup stat rows as a tint.
+      invest: inferOffensiveStat(mon, gen),
       stats,
       statsExact: !!(stats && stats.every((s) => s.exact)),
       boosts,
@@ -570,10 +574,18 @@ function renderMatchup(matchup) {
     return '';
   };
 
-  const row = (label, oursText, theirsText, win = '', cls = '') => {
-    const usCls = win === 'us' ? 'psa-match-win' : win === 'them' ? 'psa-match-lose' : '';
-    const themCls = win === 'them' ? 'psa-match-win' : win === 'us' ? 'psa-match-lose' : '';
-    return `<tr class="${cls}"><td>${escapeHtml(label)}</td><td class="psa-match-us-col ${usCls}">${escapeHtml(oursText)}</td><td class="psa-match-them-col ${themCls}">${escapeHtml(theirsText)}</td></tr>`;
+  const row = (label, oursText, theirsText, win = '', cls = '', usInvest = null, themInvest = null) => {
+    const usCls = [win === 'us' ? 'psa-match-win' : win === 'them' ? 'psa-match-lose' : '', usInvest ? 'psa-match-invest' : ''].filter(Boolean).join(' ');
+    const themCls = [win === 'them' ? 'psa-match-win' : win === 'us' ? 'psa-match-lose' : '', themInvest ? 'psa-match-invest' : ''].filter(Boolean).join(' ');
+    const investTitle = (invest) =>
+      invest === 'atk'
+        ? 'Revealed moves read physical — Atk is likely invested (252 EV)'
+        : invest === 'spa'
+          ? 'Revealed moves read special — SpA is likely invested (252 EV)'
+          : '';
+    const usTitle = usInvest ? ` title="${investTitle(usInvest)}"` : '';
+    const themTitle = themInvest ? ` title="${investTitle(themInvest)}"` : '';
+    return `<tr class="${cls}"><td>${escapeHtml(label)}</td><td class="psa-match-us-col ${usCls}"${usTitle}>${escapeHtml(oursText)}</td><td class="psa-match-them-col ${themCls}"${themTitle}>${escapeHtml(theirsText)}</td></tr>`;
   };
 
   const hpUs = matchup.ours.hpPercent, hpThem = matchup.theirs.hpPercent;
@@ -624,6 +636,17 @@ function renderMatchup(matchup) {
     dmgUs = dmgText(oursDmg) + (oursDmg ? ` ${miniBar(oursDmg.pct, true)}` : '');
     dmgThem = dmgText(theirsDmg) + (theirsDmg ? ` ${miniBar(theirsDmg.pct, true, theirHidden?.pct, theirHidden?.max, matchup.ours.hpPercent, theirHidden?.move, 'matchup-hidden')}` : '');
     if (theirHidden) dmgThem += ` <span class="psa-muted">(could: ~${Math.round(theirHidden.pct)}% ${theirHidden.move})</span>`;
+    // Item-condition notes: Focus Sash survives a KO, Weakness Policy triggers.
+    // These are inline so the player sees them at a glance in the Damage row.
+    const itemNotes = dmg?.notes ?? [];
+    const sashUs = itemNotes.find((n) => n.side === 'us' && n.kind === 'sash');
+    const wpUs = itemNotes.find((n) => n.side === 'us' && n.kind === 'wp');
+    const sashThem = itemNotes.find((n) => n.side === 'them' && n.kind === 'sash');
+    const wpThem = itemNotes.find((n) => n.side === 'them' && n.kind === 'wp');
+    if (sashUs) dmgUs += ` <span class="psa-muted">⚠ ${sashUs.text}</span>`;
+    if (wpUs) dmgUs += ` <span class="psa-warn">⚠ ${wpUs.text}</span>`;
+    if (sashThem) dmgThem += ` <span class="psa-muted">⚠ ${sashThem.text}</span>`;
+    if (wpThem) dmgThem += ` <span class="psa-warn">⚠ ${wpThem.text}</span>`;
     dmgUsCls = cellCls(true, oursDmg?.pct ?? null);
     dmgThemCls = cellCls(false, theirsDmg?.pct ?? null);
   }
@@ -645,9 +668,9 @@ function renderMatchup(matchup) {
       <thead><tr class="psa-match-headrow"><th class="psa-match-th-label"></th><th>You</th><th>Them</th></tr></thead>
       <tbody>
         ${row('HP', hpText(matchup.ours), hpText(matchup.theirs), hpWin)}
-        ${row('Atk', statText(matchup.ours, 'A'), statText(matchup.theirs, 'A'), winnerOf(statOf(matchup.ours, 'A'), statOf(matchup.theirs, 'A')))}
+        ${row('Atk', statText(matchup.ours, 'A'), statText(matchup.theirs, 'A'), winnerOf(statOf(matchup.ours, 'A'), statOf(matchup.theirs, 'A')), '', matchup.ours.invest === 'atk' ? 'atk' : null, matchup.theirs.invest === 'atk' ? 'atk' : null)}
         ${row('Def', statText(matchup.ours, 'D'), statText(matchup.theirs, 'D'), winnerOf(statOf(matchup.ours, 'D'), statOf(matchup.theirs, 'D')))}
-        ${row('SpA', statText(matchup.ours, 'SA'), statText(matchup.theirs, 'SA'), winnerOf(statOf(matchup.ours, 'SA'), statOf(matchup.theirs, 'SA')))}
+        ${row('SpA', statText(matchup.ours, 'SA'), statText(matchup.theirs, 'SA'), winnerOf(statOf(matchup.ours, 'SA'), statOf(matchup.theirs, 'SA')), '', matchup.ours.invest === 'spa' ? 'spa' : null, matchup.theirs.invest === 'spa' ? 'spa' : null)}
         ${row('SpD', statText(matchup.ours, 'SD'), statText(matchup.theirs, 'SD'), winnerOf(statOf(matchup.ours, 'SD'), statOf(matchup.theirs, 'SD')))}
         ${row('Spe', statText(matchup.ours, 'S'), statText(matchup.theirs, 'S'), winnerOf(statOf(matchup.ours, 'S'), statOf(matchup.theirs, 'S')), 'psa-match-row-spe')}
         ${dmgRow}

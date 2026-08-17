@@ -128,6 +128,41 @@ export const TERRAIN_NAMES = {
   Psychic: 'Psychic',
 };
 
+// Infer a mon's likely offensive investment from its revealed move categories:
+// a mon that has revealed mostly physical damaging moves is almost certainly
+// Atk-invested (mostly special moves → SpA-invested). Returns 'atk' | 'spa' |
+// null (null = no signal — nothing revealed, a true mixed set, or too little
+// evidence).
+//
+// Evidence threshold: the majority category needs ≥2 moves AND at least 3×
+// the minority. A single revealed move proves nothing (a special attacker's
+// physical coverage is common); a 2-1 or 2-2 split is a genuinely mixed set;
+// and a 2-0 split (only physical moves shown) or classic 3-1 set (physical
+// attacker with one special coverage move) DOES infer. Status moves don't
+// count either way — they say nothing about offensive investment.
+//
+// This only fills the no-observation gap — it biases the DEFAULT EV
+// assumption, and a narrowed evEstimate range still wins over it.
+export function inferOffensiveStat(mon, gen = 9) {
+  const moves = mon?.moves ?? [];
+  if (!moves.length) return null;
+  let physical = 0;
+  let special = 0;
+  for (const name of moves) {
+    let category;
+    try {
+      category = new Move(gen, name).category;
+    } catch {
+      continue; // unknown move — no signal from it
+    }
+    if (category === 'Physical') physical += 1;
+    else if (category === 'Special') special += 1;
+  }
+  if (physical >= 2 && physical >= special * 3) return 'atk';
+  if (special >= 2 && special >= physical * 3) return 'spa';
+  return null;
+}
+
 export const canonicalWeather = (name) => WEATHER_NAMES[name] ?? null;
 export const canonicalTerrain = (name) => TERRAIN_NAMES[name] ?? null;
 
@@ -211,11 +246,23 @@ export function damagePercent(gen, atkMon, defMon, moveName, field, opts = {}) {
   // defender's Atk (it's the stat the move runs off), and the attacker's own
   // attacking stat is irrelevant (its EVs only matter for other moves).
   const isFoulPlay = move.name === 'Foul Play';
+  // Physical/special inference: a mon that has only revealed physical moves is
+  // almost certainly Atk-invested (only special moves → SpA-invested). Bias
+  // the default EV assumption accordingly — a known physical attacker's
+  // special coverage is priced at ~0 SpA (they put the EVs in Atk), not 252,
+  // and vice versa. This matters most for hidden-move threats (a physical
+  // Garchomp's unrevealed Fire Blast shouldn't be treated as a 252-SpA nuke)
+  // and for Foul Play, which runs off the defender's Atk: a known special
+  // attacker's Atk is ~0, so Foul Play against it hits for much less.
+  const atkInfer = inferOffensiveStat(atkMon, gen);
+  const defInfer = inferOffensiveStat(defMon, gen);
   const atkEvs = isFoulPlay
     ? (opts.attackerEvs ?? {})
-    : (opts.attackerEvs ?? (move.category === 'Physical' ? { atk: 252 } : { spa: 252 }));
+    : (opts.attackerEvs ?? (move.category === 'Physical'
+        ? { atk: atkInfer === 'spa' ? 0 : 252 }
+        : { spa: atkInfer === 'atk' ? 0 : 252 }));
   const defEvs = isFoulPlay
-    ? (opts.defenderEvs ?? { hp: 252, def: 252, atk: 252 })
+    ? (opts.defenderEvs ?? { hp: 252, def: 252, atk: defInfer === 'spa' ? 0 : 252 })
     : (opts.defenderEvs ?? (move.category === 'Physical' ? { hp: 252, def: 252 } : { hp: 252, spd: 252 }));
   const useEstimates = opts.useEstimates !== false;
   let attacker;

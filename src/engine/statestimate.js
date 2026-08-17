@@ -22,7 +22,7 @@
 // blanket 252-EV assumption, so damage calcs get more accurate as we learn.
 
 import { Move, SPECIES } from '@smogon/calc';
-import { damagePercent, buildField } from './calc.js';
+import { damagePercent, buildField, inferOffensiveStat } from './calc.js';
 
 const EV_MIN = 0;
 const EV_MAX = 252;
@@ -40,7 +40,13 @@ const MAX_TRUSTED_WIDTH = 48;
 // "Working" EV set for each side during a search: current estimates where
 // known, else the standard assumption (attacker: 252 in the relevant
 // offensive stat; defender: 252 HP + 252 in the relevant defensive stat).
-function workingEvs(attacker, defender, atkStat, defStat) {
+//
+// Physical/special inference sharpens the fallback: a mon that has only
+// revealed physical moves is Atk-invested (only special moves → SpA), so the
+// OTHER offensive stat is held at ~0 instead of 252 — a special attacker's
+// physical coverage hits from no Atk EVs, and pricing it at 252 would skew
+// the defender's narrowing.
+function workingEvs(attacker, defender, atkStat, defStat, gen = 9) {
   const pick = (mon, stat, fallback) => {
     const r = mon?.evEstimate?.[stat];
     if (!r) return fallback;
@@ -48,8 +54,14 @@ function workingEvs(attacker, defender, atkStat, defStat) {
     if (width > MAX_TRUSTED_WIDTH) return fallback;
     return Math.max(0, Math.min(252, Math.round((r[0] + r[1]) / 2 / EV_STEP) * EV_STEP));
   };
+  // The attacker's held offensive stat: if we can infer its investment and
+  // it does NOT match this move's stat, the held value is ~0 (a special
+  // attacker's physical coverage hits from no Atk EVs; a physical attacker's
+  // special coverage from no SpA EVs). Matching or unknown → standard 252.
+  const atkInfer = inferOffensiveStat(attacker, gen);
+  const atkFallback = atkInfer && atkInfer !== atkStat ? 0 : 252;
   return {
-    attacker: { [atkStat]: pick(attacker, atkStat, 252) },
+    attacker: { [atkStat]: pick(attacker, atkStat, atkFallback) },
     defender: { hp: pick(defender, 'hp', 252), [defStat]: pick(defender, defStat, 252) },
   };
 }
@@ -140,7 +152,7 @@ export function narrowStat(
   gen, attacker, defender, moveName, field, stat, atkStat, defStat, damagePct, prev, pinned
 ) {
   if (damagePct <= 0 || damagePct > 100) return prev ?? null;
-  const held = workingEvs(attacker, defender, atkStat, defStat);
+  const held = workingEvs(attacker, defender, atkStat, defStat, gen);
   const range = (ev) => rollRange(gen, attacker, defender, moveName, field, pinned, stat, ev, held);
   if (!range(EV_MIN) || !range(EV_MAX)) return prev ?? null; // move/species calc failed
 

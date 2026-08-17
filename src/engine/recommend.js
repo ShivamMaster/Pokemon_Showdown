@@ -21,8 +21,8 @@
 // available: profile.switchTendency.atLowHp and profile.commonSwitchIns
 // (species -> weight). Without a profile, sensible defaults apply.
 
-import { SPECIES, MOVES } from '@smogon/calc';
-import { damagePercent, buildField, fieldAfter, round1, effectivenessOf } from './calc.js';
+import { SPECIES, MOVES, Move } from '@smogon/calc';
+import { damagePercent, buildField, fieldAfter, round1, effectivenessOf, inferOffensiveStat } from './calc.js';
 import { worstThreat, teamThreats } from './movepool.js';
 import { speedOrder, speedLine, movePriority } from './speed.js';
 
@@ -684,10 +684,40 @@ export function matchupDamage(gen, ourMon, theirMon, field, calcOpts = {}) {
   const ours = bestOf(ourMon, theirMon);
   const theirs = bestOf(theirMon, ourMon);
   const hidden = worstThreat(theirMon, ourMon, gen, field, calcOpts);
+
+  // Item-condition plays: annotate when an item changes what a hit
+  // accomplishes. These show in the matchup Damage row so the player
+  // sees them at a glance, not buried in the reasoning.
+  const notes = [];
+  // Our hit vs their Focus Sash: at full HP, the Sash eats the KO.
+  if (ours && theirs) {
+    const theirItem = theirMon.itemRevealed && !theirMon.itemConsumed ? theirMon.item : null;
+    const theirHp = theirMon.hpPercent ?? 100;
+    if (theirItem === 'Focus Sash' && ours.max >= theirHp && theirHp >= 99) {
+      notes.push({ side: 'us', text: `their Focus Sash survives it`, kind: 'sash' });
+    }
+    // Our SE hit triggers their Weakness Policy: price in the +2 counter.
+    if (theirItem === 'Weakness Policy' && ours.effectiveness >= 2 && ours.max < theirHp) {
+      notes.push({ side: 'us', text: `triggers their Weakness Policy (+2)`, kind: 'wp' });
+    }
+  }
+  // Their hit vs our Focus Sash: same mirror for their side.
+  if (theirs) {
+    const ourItem = ourMon.itemRevealed && !ourMon.itemConsumed ? ourMon.item : null;
+    const ourHp = ourMon.hpPercent ?? 100;
+    if (ourItem === 'Focus Sash' && theirs.max >= ourHp && ourHp >= 99) {
+      notes.push({ side: 'them', text: `your Focus Sash survives it`, kind: 'sash' });
+    }
+    if (ourItem === 'Weakness Policy' && theirs.effectiveness >= 2 && theirs.max < ourHp) {
+      notes.push({ side: 'them', text: `triggers your Weakness Policy (+2)`, kind: 'wp' });
+    }
+  }
+
   return {
     ours,
     theirs,
     theirHidden: hidden && hidden.pct >= 50 ? { move: hidden.move, pct: hidden.pct, max: hidden.max } : null,
+    notes: notes.length ? notes : null,
   };
 }
 
@@ -854,14 +884,24 @@ export function bestSwitchIn(ourTeam, theirActive, gen, field, profile = null, c
 // ---------------------------------------------------------------------------
 
 // Rough projection of how many turns each active takes to finish the other,
-// counting their best hit (revealed + discounted hidden) against us, our chip
+// counting their best hit (revealed + FULL hidden worst) against us, our chip
 // drain per turn (burn/poison/weather), and the same for them. Returns null
 // when neither side can realistically finish the other. Used to call out
 // races the player is losing: "they finish you in 2 turns — win now or
 // switch".
+//
+// Unlike effectiveIncoming (which discounts hidden moves at 0.6× because
+// they're speculative), the race projection uses full worst-case damage —
+// a race is a survival calculation, and you need to plan for the strongest
+// move they COULD have, not the most likely one.
 export function raceProjection(ourActive, theirActive, gen, field, calcOpts = {}, ourSide = null) {
   if (!ourActive?.species || !theirActive?.species) return null;
-  const theirHit = effectiveIncoming(theirActive, ourActive, gen, field, calcOpts);
+  const theirRevealed = incomingPercent(theirActive, ourActive, gen, field, calcOpts);
+  const theirHidden = worstThreat(theirActive, ourActive, gen, field, calcOpts);
+  // Full worst-case: use the hidden move at 100% (not discounted) when it's
+  // stronger than their best revealed move.
+  const theirHit = Math.max(theirRevealed.pct, theirHidden && theirHidden.pct >= 50 ? theirHidden.pct : 0);
+  const raceHidden = theirHidden && theirHidden.pct > theirRevealed.pct ? theirHidden : null;
   const ourHit = ownBestDamage(ourActive, theirActive, gen, field, calcOpts);
   const ourHp = ourActive.hpPercent ?? 100;
   const theirHp = theirActive.hpPercent ?? 100;
@@ -874,7 +914,7 @@ export function raceProjection(ourActive, theirActive, gen, field, calcOpts = {}
   const ourTurns = theirDps > 0 ? Math.ceil(ourHp / theirDps) : Infinity;
   const theirTurns = ourDps > 0 ? Math.ceil(theirHp / ourDps) : Infinity;
   if (ourTurns === Infinity && theirTurns === Infinity) return null;
-  return { ourTurns, theirTurns, theirHit: round1(theirHit), ourHit: round1(ourHit), ourDrain };
+  return { ourTurns, theirTurns, theirHit: round1(theirHit), ourHit: round1(ourHit), ourDrain, raceHidden };
 }
 
 // ---------------------------------------------------------------------------
@@ -1381,8 +1421,9 @@ export function recommend(state, opts = {}) {
     const race = raceProjection(ourActive, theirTarget, gen, field, calcOpts, ourSide);
     if (race && race.ourTurns <= 2 && race.theirTurns > race.ourTurns && !bestMove?.ko) {
       const chipNote = race.ourDrain > 0 ? ` (incl. ~${round1(race.ourDrain)}%/turn chip)` : '';
+      const hiddenNote = race.raceHidden ? ` (includes likely ${race.raceHidden.move} ~${round1(race.raceHidden.pct)}%)` : '';
       reasoning.push(
-        `Race check: their ${theirTarget.species} finishes you in ~${race.ourTurns} turn${race.ourTurns === 1 ? '' : 's'} at ~${race.theirHit}%/turn${chipNote} — you can't outlast it; win this turn or switch.`
+        `Race check: their ${theirTarget.species} finishes you in ~${race.ourTurns} turn${race.ourTurns === 1 ? '' : 's'} at ~${race.theirHit}%/turn${chipNote}${hiddenNote} — you can't outlast it; win this turn or switch.`
       );
     }
   }
@@ -1484,6 +1525,23 @@ export function recommend(state, opts = {}) {
     const dmg = matchupDamage(gen, ourActive, theirTarget, field, calcOpts);
     if (dmg.theirs && dmg.theirs.pct >= 25) {
       reasoning.push(`Their ${theirTarget.species} hits your ${ourActive.species} for ~${round1(dmg.theirs.pct)}% (${dmg.theirs.move}).`);
+    }
+    // Physical/special inference: a mon that has only revealed physical moves
+    // is almost certainly Atk-invested (only special moves → SpA). Make the
+    // read explicit — it explains why their physical hits are priced high
+    // (and Foul Play hits them hard) or their special ones are (and their
+    // physical coverage is weak).
+    const invest = inferOffensiveStat(theirTarget, gen);
+    if (invest && !theirTarget.terastallized) {
+      const nPhys = (theirTarget.moves ?? []).filter((m) => {
+        try { return new Move(gen, m).category === 'Physical'; } catch { return false; }
+      }).length;
+      const nSpec = (theirTarget.moves ?? []).length - nPhys;
+      reasoning.push(
+        invest === 'atk'
+          ? `Their ${theirTarget.species} reads as a physical attacker (${nPhys} physical / ${nSpec} special moves shown) — its hits are priced at 252 Atk EV, and Foul Play would punish it.`
+          : `Their ${theirTarget.species} reads as a special attacker (${nSpec} special / ${nPhys} physical moves shown) — its special hits are priced at 252 SpA EV, its physical coverage is weak, and Foul Play hits it soft.`
+      );
     }
   }
 

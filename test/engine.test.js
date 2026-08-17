@@ -577,6 +577,20 @@ test('recommend: no damage claim against a predicted switch-in', () => {
   );
 });
 
+test('recommend: a revealed physical attacker is called out and priced accordingly', () => {
+  // Their Garchomp has shown only physical moves (3-1 with one special
+  // coverage move) — the engine should read it as Atk-invested and say so.
+  const state = makeState({
+    ourActive: { species: 'Umbreon', moves: ['Foul Play', 'Dark Pulse'] },
+    theirActive: { species: 'Garchomp', hpPercent: 100, moves: ['Earthquake', 'Outrage', 'Stone Edge', 'Fire Blast'] },
+  });
+  const rec = recommend(state);
+  assert.ok(
+    rec.reasoning.some((r) => r.includes('reads as a physical attacker') && r.includes('Foul Play would punish it')),
+    `expected the physical-attacker read, got: ${JSON.stringify(rec.reasoning)}`
+  );
+});
+
 test('fixture: full recommendation at the last decision point (turn 22)', () => {
   const lines = realLog.split('\n');
   const prefix = lines.slice(0, lines.indexOf('|turn|22')).join('\n');
@@ -1473,5 +1487,24 @@ test('race: no warning when our move already KOs this turn', () => {
   assert.ok(
     !rec.reasoning.some((r) => r.includes('Race check')),
     'a KO this turn ends the race before it matters'
+  );
+});
+
+test('race: counts their hidden worst move (full, not discounted) in per-turn damage', () => {
+  // Their Garchomp has only Earthquake revealed (~53% vs Weavile), but its
+  // learnset hides a 4×-effective Brick Break (~108%) — the race must run on
+  // that full worst-case number, and name the move so the player knows.
+  const state = makeState({
+    ourActive: { species: 'Weavile', hpPercent: 40, moves: ['Ice Shard'] },
+    theirActive: { species: 'Garchomp', hpPercent: 100, moves: ['Earthquake'] },
+  });
+  const rec = recommend(state);
+  const line = rec.reasoning.find((r) => r.includes('Race check'));
+  assert.ok(line, `expected a race warning, got: ${JSON.stringify(rec.reasoning)}`);
+  assert.ok(line.includes('Brick Break'), `the race should name the hidden move: ${line}`);
+  assert.ok(line.includes('~107.6%'), `the per-turn damage should be the FULL hidden hit: ${line}`);
+  assert.ok(
+    line.includes('1 turn'),
+    `at ~108%/turn on 40% HP the finish is immediate: ${line}`
   );
 });

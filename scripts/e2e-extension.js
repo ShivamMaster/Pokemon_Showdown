@@ -8,7 +8,9 @@
 //      through the isolated-world storage bridge),
 //   3. the profile survives a page reload (loaded back from chrome.storage),
 //   4. the options page lists the learned profile,
-//   5. flipping the panel setting in storage hides/shows the panel live.
+//   5. flipping the panel setting in storage hides/shows the panel live,
+//   6. item-condition plays (Focus Sash / Weakness Policy) show inline in the
+//      matchup Damage row, not just the reasoning.
 //
 // Requires a build first: npm run build
 //
@@ -480,6 +482,68 @@ try {
       { timeout: 30000 }
     );
     results.compactPersisted = true;
+  });
+
+  // 5b. Item-condition plays surface in the matchup Damage row, not just the
+  // reasoning: feed the reader a matchup where our best move KOs their
+  // full-HP active holding a revealed Focus Sash (the row must say the Sash
+  // survives it), then one where our super-effective click would trigger a
+  // revealed Weakness Policy (the row must warn). Same live stepQueue the
+  // compact step uses to fabricate a matchup.
+  await step('itemNotes', async () => {
+    // Focus Sash: our Kyurem's Ice Beam KOs their full-HP Garchomp, but the
+    // revealed Sash eats the KO — the Damage row must say so.
+    await page.evaluate(() => {
+      const battle = window.app?.curRoom?.battle;
+      if (!battle || !Array.isArray(battle.stepQueue)) throw new Error('no battle stepQueue');
+      battle.stepQueue.push(
+        '|switch|p1a: Kyurem|Kyurem|100/100',
+        '|switch|p2a: Garchomp|Garchomp|100/100',
+        '|move|p1a: Kyurem|Ice Beam|p2a: Garchomp',
+        '|move|p2a: Garchomp|Earthquake|p1a: Kyurem',
+        '|item|p2a: Garchomp|Focus Sash'
+      );
+    });
+    await page.waitForFunction(
+      () => (document.getElementById('psa-overlay')?.innerText ?? '').includes('their Focus Sash survives it'),
+      { timeout: 20000 }
+    );
+    const sashRow = await page.evaluate(() => {
+      const panel = document.querySelector('#psa-overlay .psa-panel');
+      const row = panel?.querySelector('.psa-match-row-dmg');
+      return row?.innerText ?? '';
+    });
+    if (!sashRow.includes('their Focus Sash survives it')) {
+      throw new Error(`sash note missing from the Damage row: ${JSON.stringify(sashRow)}`);
+    }
+    results.itemSashNote = true;
+
+    // Weakness Policy: our Milotic's Ice Beam is 4× on their Dragonite but
+    // doesn't KO — clicking it triggers the +2, and the row must warn.
+    await page.evaluate(() => {
+      const battle = window.app?.curRoom?.battle;
+      if (!battle || !Array.isArray(battle.stepQueue)) throw new Error('no battle stepQueue');
+      battle.stepQueue.push(
+        '|switch|p1a: Milotic|Milotic|100/100',
+        '|switch|p2a: Dragonite|Dragonite|100/100',
+        '|move|p1a: Milotic|Ice Beam|p2a: Dragonite',
+        '|move|p2a: Dragonite|Outrage|p1a: Milotic',
+        '|item|p2a: Dragonite|Weakness Policy'
+      );
+    });
+    await page.waitForFunction(
+      () => (document.getElementById('psa-overlay')?.innerText ?? '').includes('triggers their Weakness Policy (+2)'),
+      { timeout: 20000 }
+    );
+    const wpRow = await page.evaluate(() => {
+      const panel = document.querySelector('#psa-overlay .psa-panel');
+      const row = panel?.querySelector('.psa-match-row-dmg');
+      return row?.innerText ?? '';
+    });
+    if (!wpRow.includes('triggers their Weakness Policy (+2)')) {
+      throw new Error(`WP note missing from the Damage row: ${JSON.stringify(wpRow)}`);
+    }
+    results.itemWpNote = true;
   });
 
   // 6. Friend aliases: seed a profile named "John" with "vkhss" as an alias;

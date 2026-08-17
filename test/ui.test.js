@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 import { parseLog } from '../src/reader/reader.js';
-import { createPokemon, addMove } from '../src/reader/state.js';
+import { createBattleState, createPokemon, addMove } from '../src/reader/state.js';
 import { buildPanelModel, renderPanel, buildPanelHtml, escapeHtml } from '../src/ui/panel.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -420,6 +420,96 @@ test('render: damage row with win/dim tinting and the hidden-move warning', () =
   assert.ok(row.includes('psa-mini-ko') && row.includes('would KO'), 'hidden threat crossing our HP gets a would-KO label');
   assert.ok(row.includes('left:80%'), 'the label sits at the end of the dashed segment');
   assert.ok(row.includes('max roll (~86%) exceeds the 7% HP remaining'), 'the label explains the KO math');
+});
+
+test('render: Focus Sash / Weakness Policy plays show inline in the Damage row', () => {
+  // Build a controlled state: our Kyurem's Ice Beam KOs their full-HP
+  // Garchomp, but the revealed Focus Sash eats the KO — the row must say so.
+  const st = createBattleState();
+  st.gen = 9;
+  st.gametype = 'singles';
+  const kyurem = createPokemon({ ident: 'p1a: Kyurem', side: 'p1', species: 'Kyurem', level: 100 });
+  kyurem.hpPercent = 100;
+  kyurem.hp = { cur: 100, max: 100 };
+  addMove(kyurem, 'Ice Beam');
+  const garchomp = createPokemon({ ident: 'p2a: Garchomp', side: 'p2', species: 'Garchomp', level: 100 });
+  garchomp.hpPercent = 100;
+  garchomp.hp = { cur: 100, max: 100 };
+  addMove(garchomp, 'Earthquake');
+  garchomp.item = 'Focus Sash';
+  garchomp.itemRevealed = true;
+  st.sides.p1.pokemon.push(kyurem);
+  st.sides.p1.active = [kyurem.ident];
+  st.sides.p2.pokemon.push(garchomp);
+  st.sides.p2.active = [garchomp.ident];
+
+  const html = renderPanel(buildPanelModel(st));
+  const row = html.slice(html.indexOf('psa-match-row-dmg'), html.indexOf('</tr>', html.indexOf('psa-match-row-dmg')));
+  assert.ok(row.includes('their Focus Sash survives it'), `sash note inline in the row: ${row}`);
+
+  // Same setup but with a Weakness Policy holder: our SE hit (4×) that does
+  // NOT KO triggers it — flagged in the row.
+  const st2 = createBattleState();
+  st2.gen = 9;
+  st2.gametype = 'singles';
+  const milotic = createPokemon({ ident: 'p1a: Milotic', side: 'p1', species: 'Milotic', level: 100 });
+  milotic.hpPercent = 100;
+  milotic.hp = { cur: 100, max: 100 };
+  addMove(milotic, 'Ice Beam');
+  const dnite = createPokemon({ ident: 'p2a: Dragonite', side: 'p2', species: 'Dragonite', level: 100 });
+  dnite.hpPercent = 100;
+  dnite.hp = { cur: 100, max: 100 };
+  addMove(dnite, 'Outrage');
+  dnite.item = 'Weakness Policy';
+  dnite.itemRevealed = true;
+  st2.sides.p1.pokemon.push(milotic);
+  st2.sides.p1.active = [milotic.ident];
+  st2.sides.p2.pokemon.push(dnite);
+  st2.sides.p2.active = [dnite.ident];
+
+  const html2 = renderPanel(buildPanelModel(st2));
+  const row2 = html2.slice(html2.indexOf('psa-match-row-dmg'), html2.indexOf('</tr>', html2.indexOf('psa-match-row-dmg')));
+  assert.ok(row2.includes('triggers their Weakness Policy (+2)'), `wp note inline in the row: ${row2}`);
+  assert.ok(row2.includes('psa-warn'), 'the WP caution uses the warn style');
+});
+
+test('render: inferred investment tints the Atk / SpA matchup rows', () => {
+  // Their Garchomp reveals only physical moves → reads as Atk-invested, so
+  // their Atk cell gets the invest tint (and the tooltip says why).
+  const st = createBattleState();
+  st.gen = 9;
+  st.gametype = 'singles';
+  const umbreon = createPokemon({ ident: 'p1a: Umbreon', side: 'p1', species: 'Umbreon', level: 100 });
+  umbreon.hpPercent = 100;
+  umbreon.hp = { cur: 100, max: 100 };
+  addMove(umbreon, 'Foul Play');
+  addMove(umbreon, 'Dark Pulse');
+  const garchomp = createPokemon({ ident: 'p2a: Garchomp', side: 'p2', species: 'Garchomp', level: 100 });
+  garchomp.hpPercent = 100;
+  garchomp.hp = { cur: 100, max: 100 };
+  addMove(garchomp, 'Earthquake');
+  addMove(garchomp, 'Outrage');
+  addMove(garchomp, 'Stone Edge');
+  addMove(garchomp, 'Fire Blast');
+  st.sides.p1.pokemon.push(umbreon);
+  st.sides.p1.active = [umbreon.ident];
+  st.sides.p2.pokemon.push(garchomp);
+  st.sides.p2.active = [garchomp.ident];
+
+  const m = buildPanelModel(st);
+  assert.equal(m.matchup.theirs.invest, 'atk', 'their physical set reads as atk-invested');
+
+  const html = renderPanel(m);
+  const table = html.slice(html.indexOf('<table class="psa-match-table"'), html.indexOf('</table>'));
+  const atkRow = table.slice(table.indexOf('<td>Atk</td>'), table.indexOf('</tr>', table.indexOf('<td>Atk</td>')));
+  const themAtkCell = atkRow.slice(atkRow.indexOf('psa-match-them-col'), atkRow.indexOf('>', atkRow.indexOf('psa-match-them-col')));
+  const usAtkCell = atkRow.slice(atkRow.indexOf('psa-match-us-col'), atkRow.indexOf('>', atkRow.indexOf('psa-match-us-col')));
+  assert.ok(themAtkCell.includes('psa-match-invest'), 'their Atk cell is tinted');
+  assert.ok(!usAtkCell.includes('psa-match-invest'), 'our Atk is NOT tinted (mixed 2-2 set)');
+  assert.ok(atkRow.includes('Revealed moves read physical'), 'the Atk tint carries an explanatory tooltip');
+  // Their SpA is NOT tinted — the investment is in Atk, not SpA.
+  const spaRow = table.slice(table.indexOf('<td>SpA</td>'), table.indexOf('</tr>', table.indexOf('<td>SpA</td>')));
+  assert.ok(!spaRow.includes('psa-match-invest'), 'their SpA cell stays untinted (physical attacker)');
 });
 
 test('render: a potential OHKO on us shows red in the damage row', () => {

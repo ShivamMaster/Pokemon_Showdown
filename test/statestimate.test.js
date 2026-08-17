@@ -8,7 +8,7 @@ import path from 'node:path';
 import { Field } from '@smogon/calc';
 import { createBattleState, createPokemon, addMove } from '../src/reader/state.js';
 import { BattleReader } from '../src/reader/reader.js';
-import { damagePercent, buildPokemon, buildField } from '../src/engine/calc.js';
+import { damagePercent, buildPokemon, buildField, inferOffensiveStat } from '../src/engine/calc.js';
 import {
   applyObservation,
   applyObservations,
@@ -253,6 +253,93 @@ test('applyObservation: a Foul Play hit is evidence about the DEFENDER, never th
   assert.ok(def.evEstimate?.def, 'defender Def estimate should exist');
   assert.ok(def.evEstimate.atk[1] >= 200, `invested Garchomp, got atk ${def.evEstimate.atk}`);
   assert.ok(def.evEstimate.def[1] >= 200, `invested Garchomp, got def ${def.evEstimate.def}`);
+});
+
+// ---------------------------------------------------------------------------
+// Physical/special EV inference from revealed move categories
+// ---------------------------------------------------------------------------
+
+test('inferOffensiveStat: a mostly-physical moveset reads as Atk-invested', () => {
+  const garchomp = createPokemon({ ident: 'p1a: Garchomp', side: 'p1', species: 'Garchomp' });
+  addMove(garchomp, 'Earthquake');
+  addMove(garchomp, 'Outrage');
+  addMove(garchomp, 'Stone Edge');
+  assert.equal(inferOffensiveStat(garchomp, 9), 'atk');
+  // A physical attacker with one special coverage move still reads physical
+  // (the classic 3-1 set) — the majority category wins by a wide margin.
+  const coverage = createPokemon({ ident: 'p1b: Garchomp', side: 'p1', species: 'Garchomp' });
+  addMove(coverage, 'Earthquake');
+  addMove(coverage, 'Outrage');
+  addMove(coverage, 'Stone Edge');
+  addMove(coverage, 'Fire Blast');
+  assert.equal(inferOffensiveStat(coverage, 9), 'atk');
+});
+
+test('inferOffensiveStat: a mostly-special moveset reads as SpA-invested', () => {
+  const dnite = createPokemon({ ident: 'p2a: Dragonite', side: 'p2', species: 'Dragonite' });
+  addMove(dnite, 'Hurricane');
+  addMove(dnite, 'Draco Meteor');
+  addMove(dnite, 'Fire Blast');
+  assert.equal(inferOffensiveStat(dnite, 9), 'spa');
+  // Same with one physical coverage move (Extreme Speed).
+  const es = createPokemon({ ident: 'p2b: Dragonite', side: 'p2', species: 'Dragonite' });
+  addMove(es, 'Hurricane');
+  addMove(es, 'Draco Meteor');
+  addMove(es, 'Fire Blast');
+  addMove(es, 'Extreme Speed');
+  assert.equal(inferOffensiveStat(es, 9), 'spa');
+});
+
+test('inferOffensiveStat: no signal from mixed, single, or no moves', () => {
+  // A true 2-2 mixed set is ambiguous — no bias.
+  const mixed = createPokemon({ ident: 'p1a: Dragonite', side: 'p1', species: 'Dragonite' });
+  addMove(mixed, 'Outrage');
+  addMove(mixed, 'Extreme Speed');
+  addMove(mixed, 'Hurricane');
+  addMove(mixed, 'Fire Blast');
+  assert.equal(inferOffensiveStat(mixed, 9), null);
+  // A single revealed move proves nothing (could be a coverage move).
+  const one = createPokemon({ ident: 'p1b: Garchomp', side: 'p1', species: 'Garchomp' });
+  addMove(one, 'Earthquake');
+  assert.equal(inferOffensiveStat(one, 9), null);
+  // No moves at all — no signal.
+  assert.equal(inferOffensiveStat({}, 9), null);
+});
+
+test('damagePercent: inferred physical attacker\'s hidden special moves are priced at ~0 SpA', () => {
+  // Garchomp with only physical moves revealed is Atk-invested — its
+  // unrevealed Fire Blast must NOT be priced as a 252-SpA nuke.
+  const garchomp = createPokemon({ ident: 'p1a: Garchomp', side: 'p1', species: 'Garchomp', level: 100 });
+  addMove(garchomp, 'Earthquake');
+  addMove(garchomp, 'Outrage');
+  const garchompUnknown = createPokemon({ ident: 'p1b: Garchomp', side: 'p1', species: 'Garchomp', level: 100 });
+  const scizor = createPokemon({ ident: 'p2a: Scizor', side: 'p2', species: 'Scizor', level: 100 });
+  const dInferred = damagePercent(9, garchomp, scizor, 'Fire Blast', new Field());
+  const dUnknown = damagePercent(9, garchompUnknown, scizor, 'Fire Blast', new Field());
+  assert.ok(
+    dInferred.mean < dUnknown.mean,
+    `inferred-physical Fire Blast (${dInferred.mean}%) should be weaker than unknown (${dUnknown.mean}%)`
+  );
+});
+
+test('damagePercent: Foul Play sharpens against a known special attacker (low Atk)', () => {
+  // Same species, same typing — only the revealed move categories differ.
+  const umbreon = createPokemon({ ident: 'p1a: Umbreon', side: 'p1', species: 'Umbreon', level: 100 });
+  addMove(umbreon, 'Foul Play');
+  const phys = createPokemon({ ident: 'p2a: Garchomp', side: 'p2', species: 'Garchomp', level: 100 });
+  addMove(phys, 'Earthquake');
+  addMove(phys, 'Outrage');
+  addMove(phys, 'Stone Edge');
+  const spec = createPokemon({ ident: 'p2b: Garchomp', side: 'p2', species: 'Garchomp', level: 100 });
+  addMove(spec, 'Fire Blast');
+  addMove(spec, 'Draco Meteor');
+  addMove(spec, 'Surf');
+  const dPhys = damagePercent(9, umbreon, phys, 'Foul Play', new Field());
+  const dSpec = damagePercent(9, umbreon, spec, 'Foul Play', new Field());
+  assert.ok(
+    dPhys.mean > dSpec.mean,
+    `Foul Play hits a physical attacker (${dPhys.mean}%) harder than a special one (${dSpec.mean}%)`
+  );
 });
 
 // ---------------------------------------------------------------------------
