@@ -30,7 +30,8 @@ best move, built in stages:
     it), setup moves are scored by the sweep they unlock, and the endgame is
     enumerated into locked 1v1s. All fed into the reasoning the panel shows.
 11. **Risk modes** (done) — the engine reads who's ahead (a board-advantage
-    score from remaining HP + bodies) and adapts how it plays: ahead →
+    score from remaining HP + bodies, refined by a game-level positional
+    win-probability read — see 15) and adapts how it plays: ahead →
     **safe** (reward the guaranteed KO, discount risky rolls, switch eagerly
     to protect the lead); behind → **aggressive** (prize the non-guaranteed
     KO swing, accept risky setups as the comeback, avoid burning tempo on
@@ -77,6 +78,35 @@ best move, built in stages:
     clicking a super-effective move into a revealed Weakness Policy prices in
     the +2 counter-attack); and a **2-turn race projection** ("their X
     finishes you in ~2 turns at ~53%/turn — win now or switch").
+15. **Positional win-probability eval** (done) — a game-level "who wins this
+    game" read (`position.js`) from six components: material (remaining HP
+    + per-body bonus), firepower (each side's total offensive rate),
+    fastest-Speed control, the hazard differential, recovery potential, and
+    the active 1v1 trade. Auto risk mode now consults the read first (an
+    even-HP board where their team sweeps yours plays aggressive, and vice
+    versa), extreme positions temper the switch bar continuously (deep ahead
+    → lower bar to protect the lead, deep behind → higher bar to save
+    tempo), and the panel shows the read: `🛡 playing safe (+230 · ~68% win)`.
+16. **2-ply opponent response** (done) — a fifth committee engine (`response`)
+    scores each candidate move one ply deeper: if it doesn't KO, their
+    active's best reply decides (KOs us back → bad trade, sets up → the
+    sweep is coming, can't punish → free hit); if it does KO, the likely
+    replacement is the read (brings in a counter → discounted, one we beat
+    → rewarded). Catches "this move lets them set up" and "this KO hands
+    them momentum" that a one-ply scorer can't see; the tuning re-run
+    confirms the shipped blend still holds its plateau with it in the
+    committee.
+17. **Endgame checkmate search** (done) — when the battle is down to ≤2 of
+    their mons (≤4 alive total), `endgameCheckmate` looks for a FORCING win
+    line instead of leaving it to per-move evaluation: **ko-now** (our
+    active finishes their last mon), **duel** (a bench piece wins the 1v1
+    even after the entry hit), **ko-then** (KO their current, then beat the
+    replacement 1v1), and **sac** (our active chips their current into a
+    bench mate's range). If *their* line is the forcing one, it warns:
+    "their Garchomp KOs your Weavile, then Dragonite beats everything 1v1 —
+    you're on a clock". The search is honest about hidden moves: every race
+    prices their hidden worst case, so an unrevealed coverage nuke refuses
+    the "forced win" claim the fully-revealed board would make.
 
 ## Stage 14: the six new engines
 
@@ -142,8 +172,47 @@ best move, built in stages:
   move** (not the discounted 0.6× used elsewhere — a survival projection
   plans for the strongest move they COULD have), and names it when it's the
   driver: "Race check: their Garchomp finishes you in ~1 turn at
-  ~107.6%/turn (includes likely Brick Break ~107.6%) — …"
-- **Physical/special EV inference** (`inferOffensiveStat`) — a mon that has
+  ~107.6%/turn (includes likely Brick Break ~107.6%) — …"  - **Smogon set-based EV priors** (`sets.js`, `data/sets-lite.js`,
+    `scripts/build-sets.js`) — every damage number now starts from each
+    species' **real top Smogon spreads** instead of a flat 252/252 guess:
+    the monthly usage stats' Spreads section is parsed into per-species
+    EV/nature candidates (built with `npm run sets`, committed for offline
+    tests), and the calc picks the spread that matches what's known about
+    the mon — the offensive stat role (physical vs special, from the
+    revealed-move inference) decides which spread to use, HP/Def/SpD
+    investment is honored, and the stat estimator's observations still
+    narrow from there. The result is that a 0-SpD Garchomp's hidden Fire
+    Blast is a ~10% coverage tick, not the ~40% the flat model claimed, and
+    Weavile's Icicle Crash reliably OHKOs — real spreads change the math
+    everywhere (tests pin the flat model with `sets: false` where the
+    controlled-EV intent matters, and the real-spread numbers otherwise).
+  - **Expected-value hidden-move pricing** — hidden-move threats are now
+    priced **two ways, deliberately**: the worst case (strongest move they
+    could hit you with, discounted 0.6×) remains the risk floor for the
+    defense-first gates and the warnings, while the switch **nets** price
+    each likely hidden move by its real Smogon usage weight
+    (`expectedIncoming` / `expectedThreat`), so a candidate threatened only
+    by a 2%-usage theorymon coverage nuke isn't over-penalized when the
+    species' real sets are known. The KO-trade exception is honored in both
+    switch paths: a candidate that threatens a KO back doesn't pay the
+    revealed-certainty penalty on top of the gate's KO allowance ("only the
+    KO justifies the trade").
+  - **2-ply opponent response** (the `response` committee engine) — each
+    candidate move is scored one ply deeper: what does their BEST reply do
+    to the resulting position? If the move doesn't KO, their active's reply
+    is the read — it **KOs us back** (a losing trade even when we move
+    first: "it survives and KOs you back (~73%)"), it **sets up** ("it
+    survives and sets up (Dragon Dance revealed)" — the "KO it NOW" warning
+    priced into the move), or it **can't punish us** (a free hit: "they
+    can't punish it (~0% back)"). If the move does KO, the read is their
+    most likely replacement: a KO that **brings in a counter** is discounted
+    ("brings in Tornadus which threatens you ~163%"), a KO whose likely
+    switch-in **we beat** is rewarded ("and Fire Blast beats the likely
+    Scizor (~240%)"). Scale is context-sized (±9), so it nudges close calls
+    without overpowering the damage anchor — and the tuning re-run confirms
+    the shipped all-1s blend still holds 43.9% / 97.6% with it in the
+    committee.
+  - **Physical/special EV inference** (`inferOffensiveStat`) — a mon that has
   revealed mostly physical damaging moves (≥2, at least 3× the special
   count) is almost certainly Atk-invested; mostly special moves →
   SpA-invested. The bias fills the gap before damage observations narrow the
@@ -157,6 +226,22 @@ best move, built in stages:
   (Atk for physical, SpA for special) gets a subtle ✦ tint and a tooltip
   ("Revealed moves read physical — Atk is likely invested (252 EV)"), so
   the read is visible at a glance without opening the reasoning.
+  - **Positional win-probability eval** (`position.js` / `positionalWinProb`)
+    — the risk mode's board read is now a game-level eval, not just HP:
+    six components (material = HP + 40/body normalized; firepower = each
+    side's total offensive RATE against the other team, deliberately
+    uncapped so a nearly-dead target doesn't make the short side look
+    strong, and only counted once both sides have revealed moves; fastest
+    effective Speed, revealed stats → sets prior → max-plausible; hazard
+    differential ~10% of a body per layer; recovery potential = recovery
+    moves × missing HP; active 1v1 trade, with their active down counting
+    as a tempo swing) weighted into a 0-1 win probability. Auto mode
+    consults the read first (≥0.66 safe / ≤0.34 aggressive, HP advantage
+    as fallback), so an even-HP board where their team sweeps yours plays
+    aggressive — and extreme positions temper the switch bar continuously
+    (×0.75 deep ahead, ×1.5 deep behind; auto mode only). The reasoning
+    line and the risk badge carry the read (`🛡 playing safe (+230 · ~68%
+    win)`), and the returned risk object gains `winProb` + `switchBar`.
 
 ## Stage 8: pixel OCR fallback
 
@@ -313,7 +398,9 @@ Three additions that give the engine more of what you know at the table:
   Rush · Ice Spinner`), not raw base power. The recommendation then warns
   about specific hidden threats (`⚠ their Dragonite could have Hurricane —
   it hits your Rillaboom for ~79.8%`), and switching is penalized when a
-  hidden move would maul the candidate you're switching into.
+  hidden move would maul the candidate you're switching into — except when
+  the candidate threatens a KO back, the one trade the defense-first rules
+  explicitly allow ("only the KO justifies the trade").
 
 ## Stage 5: per-opponent profiles, settings & options
 
@@ -433,12 +520,13 @@ The E2E uses Chrome for Testing because managed/system Chrome blocks
 npx @puppeteer/browsers install chrome@stable --path /tmp/cft-chrome
 ```
 
-Tests (333): the reader (real battle + edge cases, the live `|request|`
+Tests (377): the reader (real battle + edge cases, the live `|request|`
 fixture with moves/PP/tera/canTera, and hover observations), the UI
 renderer (including the six-slot grid, opponent potential-moves line, and
 capture status row), the engine (type advantage, KO detection, switch
 advice, utility moves, calc consistency, switch prediction, tera
-effectiveness + tera suggestions, hidden-move warnings, the real fixture),
+effectiveness + tera suggestions, hidden-move warnings, endgame checkmate
+lines, the real fixture),
 the movepool (learnsets, worst-case hidden threats, terastallized
 attackers), the tooltip parser (real captured tooltip text, mon resolution,
 and noisy OCR text with stray scene lines), the OCR client (message
@@ -512,12 +600,14 @@ captured from a real battle page and parses identically.
     switching again immediately would give them a free turn"), and a mon
     that left the field in the last turn or two is never recommended as a
     switch-in — so "switch to B" is never followed by "switch back to A".
-  - Switch evaluation includes the opponent's **hidden moves**: early in a
-    battle (or against any mon with unrevealed slots), the worst move they
-    could hit your current mon with counts toward the threat — discounted,
-    since potential moves aren't certainties — so the engine suggests
-    switching away from a lead that a possible move would wreck. Once all 4
-    moves are revealed, hidden-move speculation stops.
+  - Switch evaluation includes the opponent's **hidden moves** — priced two
+    ways, deliberately: the **worst case** (the strongest move they could
+    hit you with, discounted since potential moves aren't certainties) drives
+    the defense-first gates and the warnings, while the **expected value**
+    (each likely hidden move weighted by real Smogon usage) drives the
+    switch nets — so a candidate threatened only by a 2%-usage theorymon
+    coverage nuke isn't over-penalized when the species' real sets are known.
+    Once all 4 moves are revealed, hidden-move speculation stops.
   - When your active is down, the forced send-in (`bestSwitchIn`) weighs
     incoming damage (revealed **and** discounted hidden) one-for-one against
     the candidate's own offense, so it won't send in a Pokémon that's weak to
@@ -545,8 +635,11 @@ captured from a real battle page and parses identically.
     gamble that wins if it lands — being outsped hurts less, risky setups
     become the comeback, and the switch bar rises so marginal switches
     don't bleed tempo). The panel shows the line as a badge: `🛡 playing
-    safe (+230)` or `⚔ playing aggressive (−210)`, and the reasoning
-    explains it. Options can force a mode; auto just reads the board.
+    safe (+230 · ~68% win)` or `⚔ playing aggressive (−210)`, and the
+    reasoning explains it. Options can force a mode; auto reads the board
+    via the game-level positional win-probability eval (Stage 14) — the
+    win read is consulted before the raw HP advantage, and extreme
+    positions temper the switch bar continuously.
   - **Entry hazards are charged into switches** (`hazardDamageOnEntry`):
     Stealth Rock/Steelsurge hit by type effectiveness, Spikes by layer count
     (1/8, 1/6, 1/4) — so the engine stops recommending a switch that eats
@@ -669,6 +762,52 @@ captured from a real battle page and parses identically.
     SpA and makes Foul Play hit harder, a mostly-special one prices hidden
     physical moves at ~0 Atk and makes Foul Play hit soft. Mixed or
     single-move sets stay un-inferred.
+- **Engine committee** — the move score is an explicit blend of independent
+  engines that vote on each move, and the confidence percentage comes from
+  how much they AGREE (not raw score share). The weights are real knobs —
+  `ENGINE_WEIGHTS` scales each engine's vote into the score (`blend`, calc
+  is the anchor) and into the confidence read (`agree`) — and they were
+  **tuned against real battles**: `scripts/tune-weights.js` replays a batch
+  of real Gen 9 OU logs (`test/fixtures/tune/`) turn-by-turn and compares
+  each candidate's top pick against the move the player actually made.
+  Across 12 battles the engine matches the player's move 39-49% of the time
+  on decisions where the move was already known, and puts the actual move
+  in its top-3 74-98% of the time — and no tested configuration beats the
+  shipped all-1s blend, so that's what stays. The five engines:
+  - **calc** — the damage engine (`@smogon/calc`, Foul Play aware): expected
+    damage vs the active + predicted switch-ins, capped at remaining HP. The
+    established engine, weighted 3× in the agreement read.
+  - **ko** — the KO engine: the risk-mode-aware reward for finishing the
+    target (safe prefers the guaranteed roll, aggressive the swing).
+  - **speed** — the speed/priority engine: KO-first safety, outspeed risk,
+    priority override.
+  - **context** — the situational engine: item plays (Weakness Policy / Focus
+    Sash), chip-finish, and other per-move context.
+  - **response** — the 2-ply engine: their best reply to the move and what
+    the resulting position does to us (see the next bullet).
+  Each move carries its votes (`bestMove.votes`), and the breakdown is
+  visible in BOTH places: the panel's confidence tooltip and a reasoning
+  line ("Committee on Fire Blast: calc 62 · KO +10 · speed +8 · context −4
+  · response −3 → score 84") so where the score comes from is never a black
+  box. A close
+  call between two similar moves reads ~55-60% with a "Close call between X
+  and Y — either is defensible" note instead of a misleading
+  near-coin-flip percentage. `recommend(state, { rankedMoves: true })` also
+  exposes the top-3 ranking, which the tuning harness uses to measure
+  whether the actual move lands in the engine's top options.
+- **Defense-first switch gate** — a switch whose candidate's total exposure
+  (revealed best + hidden worst) is meaningfully worse than our current
+  mon's AND genuinely threatening (≥40%) no longer gets recommended just
+  because it hits back hard: the offense bonus is zeroed unless the switch
+  threatens a KO (the KO reward still carries the swing). This is what
+  stops the engine from sending in a mon their shown coverage wrecks — the
+  bug where a candidate 2×-weak to a revealed move still netted positive
+  because its offense masked the weakness. The **forced send-in path** (our
+  active faints and we must send someone) applies the same rule absolutely:
+  with no current mon to compare against, a candidate whose total exposure
+  is genuinely threatening (≥40%) loses its offense credit unless it
+  threatens a KO — so the safest send-in wins, and a KO-trade is flagged as
+  the deliberate call it is ("only the KO justifies the ~65% it takes").
 - **Active-matchup view** — the panel shows your lead vs their lead side by
   side: HP, all five stats (exact for you, estimated ranges for them that
   narrow with learned EVs / hovered Spe), item, and ability, with the
@@ -794,11 +933,12 @@ reader.applyLine(line); // one protocol line at a time
 npm test
 ```
 
-333 tests cover the reader (real 22-turn Gen 9 OU battle + edge cases),
+369 tests cover the reader (real 22-turn Gen 9 OU battle + edge cases),
 the UI (model, HTML output, escaping, mid-battle and empty states, the
 six-slot grid, potential moves, capture status), the engine (type
 advantage, KO detection, switch advice, utility moves, calc consistency,
-switch prediction, tera, movepool threats, the real fixture), the tooltip
+switch prediction, tera, movepool threats, the real fixture, the
+positional win-probability eval, the 2-ply response engine), the tooltip
 parser (including noisy OCR text), the movepool, the OCR client + offscreen
 module, the capture module, the profiles, the storage driver, the settings
 module, and the options-page rendering. The demo page is also verified
@@ -809,9 +949,11 @@ hover-tooltip observation (PP appears in the panel), persistence across a
 page reload, the options page, the popup, **real tab capture** (start →
 frames increment → stop), **the OCR fallback** (DOM tooltip suppressed,
 pixel tooltip read, PP appears in the panel), the live panel toggle,
-compact mode, and the **item-condition notes in the Damage row** (a fed
+compact mode, the **item-condition notes in the Damage row** (a fed
 matchup with a revealed Focus Sash / Weakness Policy must show the "survives
-it" / "triggers +2" warnings inline).
+it" / "triggers +2" warnings inline), and the **engine-votes tooltip**
+(the confidence badge's title must carry the calc / KO / speed / context
+committee breakdown for the recommended move).
 
 Tests cover a real 22-turn Gen 9 OU battle (`test/fixtures/real-battle.log`,
 fetched from Showdown replays) plus hand-crafted edge cases.

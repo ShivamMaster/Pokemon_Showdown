@@ -602,8 +602,11 @@ test('priority: our priority move lands the KO even when they outspeed us', () =
   // They're faster, but our Ice Shard (4× on Garchomp) finishes it first.
   const us = makeMon('Mamoswine', { moves: ['Ice Shard'] });
   const them = makeMon('Garchomp', { hpPercent: 60, moves: ['Earthquake'] });
-  const withSpeed = evaluateMove(us, 'Ice Shard', them, [them], 1, {}, 9, field, {}, { weMoveFirst: false });
-  const without = evaluateMove(us, 'Ice Shard', them, [them], 1, {}, 9, field, {}, null);
+  // sets: false keeps the flat model where the 4× Ice Shard is a guaranteed
+  // KO — with real spreads Garchomp's def-phys bulk makes it a roll, which
+  // is a different scenario from the priority mechanics this test pins.
+  const withSpeed = evaluateMove(us, 'Ice Shard', them, [them], 1, {}, 9, field, { sets: false }, { weMoveFirst: false });
+  const without = evaluateMove(us, 'Ice Shard', them, [them], 1, {}, 9, field, { sets: false }, null);
   assert.ok(withSpeed.score > without.score, 'priority KO while outsped should be rewarded');
   assert.match(withSpeed.note, /Ice Shard has priority — you strike first/);
 });

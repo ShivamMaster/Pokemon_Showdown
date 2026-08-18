@@ -13,6 +13,7 @@
 
 import { calculate, Pokemon, Move, Field, TYPE_CHART } from '@smogon/calc';
 import { isRandomBattle, randomsLevel } from './randoms.js';
+import { spreadFor } from './sets.js';
 
 const STATS = ['hp', 'atk', 'def', 'spa', 'spd', 'spe'];
 
@@ -69,14 +70,14 @@ function baseIvs() {
 // `teraType` overrides the tera type when the mon has NOT terastallized yet —
 // this is how the engine simulates "what if we terastallize now" (the calc
 // treats a set teraType as the terastallized state).
-export function buildPokemon(gen, mon, evs = {}, teraType = null, useEstimates = true) {
+export function buildPokemon(gen, mon, evs = {}, teraType = null, useEstimates = true, nature = 'Serious') {
   // Randoms use per-species levels (79-88), not 100: an unrevealed mon in a
   // random battle should be calc'd at its template level, not a level it can
   // never actually be. Revealed levels (from the log's L79) always win.
   const defaultLevel = isRandomBattle() ? (randomsLevel(mon?.species) ?? 100) : 100;
   const opts = {
     level: mon?.level ?? defaultLevel,
-    nature: 'Serious',
+    nature,
     evs: useEstimates ? { ...baseEvs(), ...evs, ...estimatedEvs(mon) } : { ...baseEvs(), ...evs },
     ivs: baseIvs(),
   };
@@ -256,20 +257,60 @@ export function damagePercent(gen, atkMon, defMon, moveName, field, opts = {}) {
   // attacker's Atk is ~0, so Foul Play against it hits for much less.
   const atkInfer = inferOffensiveStat(atkMon, gen);
   const defInfer = inferOffensiveStat(defMon, gen);
-  const atkEvs = isFoulPlay
-    ? (opts.attackerEvs ?? {})
-    : (opts.attackerEvs ?? (move.category === 'Physical'
-        ? { atk: atkInfer === 'spa' ? 0 : 252 }
-        : { spa: atkInfer === 'atk' ? 0 : 252 }));
-  const defEvs = isFoulPlay
-    ? (opts.defenderEvs ?? { hp: 252, def: 252, atk: defInfer === 'spa' ? 0 : 252 })
-    : (opts.defenderEvs ?? (move.category === 'Physical' ? { hp: 252, def: 252 } : { hp: 252, spd: 252 }));
+  // Real competitive spreads (sets.js): replace the flat "252 EVs in the stat
+  // the move uses, neutral nature" defaults with the species' top Smogon
+  // spread when the data exists (gen-9 pre-made battles only). Explicit
+  // attackerEvs/defenderEvs still fully override — statestimate's pinned-EV
+  // probes pass their own, so the estimator is unaffected. The spread also
+  // makes the physical/special inference redundant for data species: a
+  // physical Garchomp's spread IS 252 Atk / 0 SpA, so its hidden Fire Blast
+  // is priced as a coverage tick by the data itself, not a special-case rule.
+  const useSets = opts.sets !== false && gen === 9 && !isRandomBattle();
+  const neutral = statAssumption !== 'base'; // 'base' = 0 EVs, no nature
+  let atkNature = null;
+  let defNature = null;
+  let atkEvs;
+  let defEvs;
+  if (isFoulPlay) {
+    // Foul Play runs off the TARGET's Attack — the defender's Atk EV and
+    // nature come from the spread matching its inferred offense: a known
+    // special attacker's spread has ~0 Atk (Foul Play hits it soft), a
+    // physical attacker's has 252 (full price).
+    const fpRole = defInfer === 'spa' ? 'atk-spec' : 'atk-phys';
+    const fpSpread = useSets ? spreadFor(defMon?.species, gen, fpRole) : null;
+    atkEvs = opts.attackerEvs ?? {};
+    defEvs = opts.defenderEvs ?? (fpSpread
+      ? { hp: fpSpread.evs.hp, def: fpSpread.evs.def, atk: fpSpread.evs.atk }
+      : { hp: 252, def: 252, atk: defInfer === 'spa' ? 0 : 252 });
+    defNature = neutral ? fpSpread?.nature ?? null : null;
+  } else {
+    // Attacker: pick the spread matching the mon's inferred offense — a mon
+    // that reads physical gets the max-Atk spread (its special coverage is
+    // priced at the 0 SpA that spread runs, and vice versa). Unknown
+    // inference uses the move's own category, so the species' dominant
+    // offense drives the read.
+    const atkRole =
+      atkInfer === 'spa' ? 'atk-spec' : move.category === 'Physical' ? 'atk-phys' : 'atk-spec';
+    const defRole = move.category === 'Physical' ? 'def-phys' : 'def-spec';
+    const atkSpread = useSets ? spreadFor(atkMon?.species, gen, atkRole) : null;
+    const defSpread = useSets ? spreadFor(defMon?.species, gen, defRole) : null;
+    atkEvs = opts.attackerEvs ?? (atkSpread
+      ? { atk: atkSpread.evs.atk, spa: atkSpread.evs.spa }
+      : (move.category === 'Physical'
+          ? { atk: atkInfer === 'spa' ? 0 : 252 }
+          : { spa: atkInfer === 'atk' ? 0 : 252 }));
+    defEvs = opts.defenderEvs ?? (defSpread
+      ? { hp: defSpread.evs.hp, def: defSpread.evs.def, spd: defSpread.evs.spd }
+      : (move.category === 'Physical' ? { hp: 252, def: 252 } : { hp: 252, spd: 252 }));
+    atkNature = neutral ? atkSpread?.nature ?? null : null;
+    defNature = neutral ? defSpread?.nature ?? null : null;
+  }
   const useEstimates = opts.useEstimates !== false;
   let attacker;
   let defender;
   try {
-    attacker = buildPokemon(gen, atkMon, statAssumption === 'base' && !opts.attackerEvs ? {} : atkEvs, opts.attackerTera ?? null, useEstimates);
-    defender = buildPokemon(gen, defMon, statAssumption === 'base' && !opts.defenderEvs ? {} : defEvs, opts.defenderTera ?? null, useEstimates);
+    attacker = buildPokemon(gen, atkMon, statAssumption === 'base' && !opts.attackerEvs ? {} : atkEvs, opts.attackerTera ?? null, useEstimates, atkNature ?? 'Serious');
+    defender = buildPokemon(gen, defMon, statAssumption === 'base' && !opts.defenderEvs ? {} : defEvs, opts.defenderTera ?? null, useEstimates, defNature ?? 'Serious');
   } catch {
     // Unknown species the calc can't build — skip this matchup.
     return null;

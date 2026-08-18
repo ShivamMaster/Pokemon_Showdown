@@ -23,9 +23,12 @@ import {
   teamWincon,
   sweepPotential,
   endgameLocks,
+  endgameCheckmate,
   boardAdvantage,
   resolveRiskMode,
   RISK_MODES,
+  engineAgreement,
+  positionalWinProb,
 } from '../src/engine/index.js';
 import { buildPanelModel } from '../src/ui/panel.js';
 
@@ -178,7 +181,10 @@ test('engine: a forced send-in avoids a mon weak to their (unrevealed) active', 
     ],
     theirActive: { species: 'Garchomp', moves: [] }, // nothing revealed yet
   });
-  const rec = recommend(state);
+  // sets: false keeps the flat 252-EV model — with real sets Raging Bolt's
+  // Dragon Pulse guaranteed-KOs a 0-SpD Garchomp, so the KO-trade exception
+  // (correctly) fires and this gate test couldn't pin the defensive pick.
+  const rec = recommend(state, { sets: false });
   assert.equal(rec.switchTo.species, 'Corviknight');
 });
 
@@ -268,6 +274,47 @@ test('engine: must send in a replacement when our active is down', () => {
   // Gliscor is 4x weak to Ice Spinner; Togekiss is the safer send-in.
   assert.equal(rec.switchTo.species, 'Togekiss');
   assert.ok(rec.reasoning.some((r) => r.includes('down')));
+});
+
+test('engine: forced send-in does not pick a mon their SHOWN move hits harder (defense-first gate)', () => {
+  // Our Garchomp fainted. Their Garchomp's shown Outrage 2×-hits our
+  // Dragonite (~91%) — worse than Blissey's ~59%. Dragonite hits back hard
+  // (85%), but without the gate its offense would mask the weakness. The
+  // forced send-in must pick the safer wall instead.
+  const state = makeState({
+    ourActive: { species: 'Garchomp', fainted: true, moves: ['Earthquake'] },
+    ourBench: [
+      { species: 'Dragonite', hpPercent: 100, moves: ['Outrage', 'Extreme Speed'] },
+      { species: 'Blissey', hpPercent: 100, moves: ['Soft-Boiled'] },
+    ],
+    theirActive: { species: 'Garchomp', hpPercent: 100, moves: ['Outrage', 'Earthquake'] },
+  });
+  const rec = recommend(state);
+  assert.equal(rec.bestMove, null);
+  assert.equal(rec.switchTo?.species, 'Blissey', 'the safer send-in must win over the masked offense');
+  assert.ok(rec.switchTo.note.includes('takes ~'), `got: ${rec.switchTo.note}`);
+});
+
+test('engine: the forced send-in gate still allows a KO-trade into a bad matchup', () => {
+  // Our Garchomp fainted. Weavile is 4×-weak to their shown Earthquake, but
+  // its Icicle Crash is a guaranteed KO on their Garchomp — the KO justifies
+  // the trade, and the note must say so.
+  const state = makeState({
+    ourActive: { species: 'Garchomp', fainted: true, moves: ['Earthquake'] },
+    ourBench: [
+      { species: 'Weavile', hpPercent: 100, moves: ['Icicle Crash'] },
+      { species: 'Blissey', hpPercent: 100, moves: ['Soft-Boiled'] },
+    ],
+    theirActive: { species: 'Garchomp', hpPercent: 100, moves: ['Earthquake'] },
+  });
+  // sets: false — with real spreads Garchomp's def-phys bulk makes Weavile's
+  // Icicle Crash a roll KO (not guaranteed), which is a different scenario;
+  // this test pins the gate's KO-trade exception on the controlled model.
+  const rec = recommend(state, { sets: false });
+  assert.equal(rec.bestMove, null);
+  assert.equal(rec.switchTo?.species, 'Weavile', 'the guaranteed KO still wins over the gate');
+  assert.ok(rec.switchTo.note.includes('guaranteed KO'), `got: ${rec.switchTo.note}`);
+  assert.ok(rec.switchTo.note.includes('only the KO justifies'), `got: ${rec.switchTo.note}`);
 });
 
 test('engine: predicts their switch-in when their active is down', () => {
@@ -441,7 +488,10 @@ test('engine: damage numbers match @smogon/calc directly', () => {
   const res = calculate(9, atk, def, new Move(9, 'Fire Blast'), new Field());
   const directMean = Math.round((res.damage.reduce((a, b) => a + b, 0) / res.damage.length / def.maxHP()) * 1000) / 10;
 
-  const engine = damagePercent(9, ourMon, theirMon, 'Fire Blast', new Field());
+  // sets: false so both sides use the same flat 252-EV model — this test
+  // pins wrapper-vs-library consistency, not real-set priors (covered in
+  // statestimate.test.js).
+  const engine = damagePercent(9, ourMon, theirMon, 'Fire Blast', new Field(), { sets: false });
   assert.equal(engine.mean, directMean);
   assert.equal(engine.effectiveness, 2); // Fire vs Grass/Poison Venusaur
 });
@@ -895,10 +945,15 @@ test('sweepPotential: boosted damage counts 1HKOs and 2HKOs of the remaining tea
 });
 
 test('recommend: setup is recommended when the sweep is real and the active is walled', () => {
+  // Garchomp at full HP: Wood Hammer 2HKOs it, so the boost first (then
+  // 2HKO everything) is the call. (At 40% HP Wood Hammer guaranteed-KOs it
+  // AND Knock Off beats the likely Dragapult switch-in — the 2-ply response
+  // engine correctly prefers that KO, so the setup demo needs a target that
+  // survives the first hit.)
   const state = makeState({
     ourActive: { species: 'Rillaboom', hpPercent: 70, moves: ['Wood Hammer', 'Grassy Glide', 'Knock Off', 'Swords Dance'] },
     ourBench: [{ species: 'Corviknight', hpPercent: 100, moves: ['Roost', 'Brave Bird', 'Body Press'] }],
-    theirActive: { species: 'Garchomp', hpPercent: 40, status: 'brn', moves: ['Earthquake', 'Outrage', 'Fire Fang'] },
+    theirActive: { species: 'Garchomp', hpPercent: 100, status: 'brn', moves: ['Earthquake', 'Outrage', 'Fire Fang'] },
     theirBench: [{ species: 'Dragapult', hpPercent: 100, moves: ['Draco Meteor', 'Shadow Ball'] }],
   });
   const rec = recommend(state, { ourSideId: 'p1' });
@@ -1034,6 +1089,236 @@ test('recommend: auto picks safe when clearly ahead, aggressive when behind', ()
   assert.ok(!re.reasoning.some((r) => r.includes('playing ')), 'balanced play adds no mode line');
 });
 
+// Positional win-probability eval (game-level "who wins" read)
+// ---------------------------------------------------------------------------
+
+const plainMon = (species, hpPercent = 100, moves = []) => {
+  const m = createPokemon({ ident: 'x', side: 'p1', species, level: 100 });
+  m.hpPercent = hpPercent;
+  for (const mv of moves) addMove(m, mv);
+  return m;
+};
+
+test('positionalWinProb: material dominance reads ahead, even boards hover near 0.5', () => {
+  const field = buildField(createBattleState());
+  const garchomp = plainMon('Garchomp', 100, ['Earthquake']);
+  const gliscor = plainMon('Gliscor', 100, ['Earthquake']);
+  // Even 1v1 hovers near even (the contrived EQ-vs-Gliscor immunity drags it
+  // a little below 0.5, but nowhere near a mode threshold).
+  const even = positionalWinProb([garchomp], [gliscor], 9, field, {}, { active: { ours: garchomp, theirs: gliscor } });
+  assert.ok(even.winProb > 0.34 && even.winProb < 0.66, `even board should hover near 0.5, got ${even.winProb}`);
+
+  // Three full mons vs one at 10% HP is a decided game.
+  const three = [plainMon('Garchomp'), plainMon('Corviknight', 100, ['Brave Bird']), plainMon('Blissey', 100, ['Seismic Toss'])];
+  const one = plainMon('Gliscor', 10, ['Earthquake']);
+  const threeToOne = positionalWinProb(three, [one], 9, field, {}, { active: { ours: three[0], theirs: one } });
+  assert.ok(threeToOne.winProb >= 0.66, `3v1 should read as a clear lead, got ${threeToOne.winProb}`);
+
+  // And the mirror is a clear deficit.
+  const oneVsThree = positionalWinProb([one], three, 9, field, {}, { active: { ours: one, theirs: three[0] } });
+  assert.ok(oneVsThree.winProb <= 0.34, `1v3 should read as a clear deficit, got ${oneVsThree.winProb}`);
+});
+
+test('positionalWinProb: firepower, speed and the active 1v1 tilt an even-HP board', () => {
+  const field = buildField(createBattleState());
+  // Same HP, same body count — but one side is pure walls and the other
+  // sweeps it. Position alone has to call that game.
+  const walls = [plainMon('Blissey', 100, ['Thunder Wave']), plainMon('Ferrothorn', 100, ['Leech Seed'])];
+  const sweepers = [plainMon('Iron Treads', 100, ['Ice Spinner', 'Iron Head']), plainMon('Garchomp', 100, ['Earthquake', 'Outrage'])];
+  const behind = positionalWinProb(walls, sweepers, 9, field, {}, { active: { ours: walls[0], theirs: sweepers[0] } });
+  assert.ok(behind.winProb <= 0.34, `walls vs sweepers should read behind, got ${behind.winProb}`);
+  const ahead = positionalWinProb(sweepers, walls, 9, field, {}, { active: { ours: sweepers[0], theirs: walls[0] } });
+  assert.ok(ahead.winProb >= 0.66, `sweepers vs walls should read ahead, got ${ahead.winProb}`);
+});
+
+test('positionalWinProb: hazards and recovery move the read', () => {
+  const field = buildField(createBattleState());
+  const a = plainMon('Garchomp', 100, ['Earthquake']);
+  const b = plainMon('Gliscor', 100, ['Earthquake']);
+  const act = { active: { ours: a, theirs: b } };
+  const base = positionalWinProb([a], [b], 9, field, {}, act);
+  const theirHazards = positionalWinProb([a], [b], 9, field, {}, { ...act, hazards: { ours: 0, theirs: 2 } });
+  assert.ok(theirHazards.winProb > base.winProb, 'their hazards hurt them → we read ahead');
+  const ourHazards = positionalWinProb([a], [b], 9, field, {}, { ...act, hazards: { ours: 2, theirs: 0 } });
+  assert.ok(ourHazards.winProb < base.winProb, 'our hazards hurt us → we read behind');
+
+  // A recovery move at missing HP is worth real value over the same board
+  // without it.
+  const low = plainMon('Toxapex', 40, ['Recover', 'Liquidation']);
+  const lowNoRec = plainMon('Toxapex', 40, ['Liquidation']);
+  const them = plainMon('Gliscor', 40, ['Earthquake']);
+  const withRec = positionalWinProb([low], [them], 9, field, {}, { active: { ours: low, theirs: them } });
+  const noRec = positionalWinProb([lowNoRec], [them], 9, field, {}, { active: { ours: lowNoRec, theirs: them } });
+  assert.ok(withRec.winProb > noRec.winProb, 'recovery at missing HP reads ahead of the same board without it');
+});
+
+test('positionalWinProb: their active being down is a tempo swing', () => {
+  const field = buildField(createBattleState());
+  const a = plainMon('Garchomp', 100, ['Earthquake']);
+  const b = plainMon('Gliscor', 100, ['Earthquake']);
+  const down = positionalWinProb([a], [b], 9, field, {}, { active: { ours: a, theirs: null } });
+  const up = positionalWinProb([a], [b], 9, field, {}, { active: { ours: a, theirs: b } });
+  assert.ok(down.winProb > up.winProb, 'their active down → tempo in our favor');
+});
+
+test('resolveRiskMode: the win-probability read resolves the band edges, explicit wins', () => {
+  // Even HP but the position is decided → the read decides the mode.
+  assert.equal(resolveRiskMode({}, 0, 0.7), 'safe');
+  assert.equal(resolveRiskMode({}, 0, 0.3), 'aggressive');
+  assert.equal(resolveRiskMode({}, 0, 0.5), 'normal');
+  // The raw HP advantage still resolves when the read is inconclusive.
+  assert.equal(resolveRiskMode({}, 100, 0.5), 'safe');
+  assert.equal(resolveRiskMode({}, -100, 0.5), 'aggressive');
+  // An explicit mode beats both reads.
+  assert.equal(resolveRiskMode({ riskMode: 'normal' }, 500, 0.9), 'normal');
+  assert.equal(resolveRiskMode({ riskMode: 'safe' }, -500, 0.1), 'safe');
+});
+
+test('recommend: auto flips to aggressive on position alone (even HP, their team sweeps)', () => {
+  const state = makeState({
+    ourActive: { species: 'Blissey', hpPercent: 90, moves: ['Thunder Wave'] },
+    ourBench: [{ species: 'Ferrothorn', hpPercent: 90, moves: ['Leech Seed'] }],
+    theirActive: { species: 'Iron Treads', hpPercent: 100, moves: ['Ice Spinner', 'Iron Head'] },
+    theirBench: [{ species: 'Garchomp', hpPercent: 100, moves: ['Earthquake', 'Outrage'] }],
+  });
+  const rec = recommend(state);
+  assert.equal(rec.risk.mode, 'aggressive');
+  assert.ok(rec.risk.advantage > -100 && rec.risk.advantage < 100, 'the HP board alone would read normal');
+  assert.ok(rec.risk.winProb <= 34, `the win read should be clearly behind, got ${rec.risk.winProb}`);
+  assert.ok(
+    rec.reasoning.some((r) => r.includes('playing aggressive') && r.includes('% to win')),
+    `expected an aggressive line with the win read, got: ${JSON.stringify(rec.reasoning)}`
+  );
+});
+
+test('recommend: auto flips to safe on position alone (even HP, we sweep)', () => {
+  const state = makeState({
+    ourActive: { species: 'Iron Treads', hpPercent: 100, moves: ['Ice Spinner', 'Iron Head'] },
+    ourBench: [{ species: 'Garchomp', hpPercent: 100, moves: ['Earthquake', 'Outrage'] }],
+    theirActive: { species: 'Blissey', hpPercent: 90, moves: ['Thunder Wave'] },
+    theirBench: [{ species: 'Ferrothorn', hpPercent: 90, moves: ['Leech Seed'] }],
+  });
+  const rec = recommend(state);
+  assert.equal(rec.risk.mode, 'safe');
+  assert.ok(rec.risk.winProb >= 66, `the win read should be clearly ahead, got ${rec.risk.winProb}`);
+  assert.ok(
+    rec.reasoning.some((r) => r.includes('playing safe') && r.includes('% to win')),
+    `expected a safe line with the win read, got: ${JSON.stringify(rec.reasoning)}`
+  );
+});
+
+test('recommend: the switch bar is tempered by position in auto mode, untouched with explicit modes', () => {
+  // A decided 3v1: auto reads safe (winProb ≥ 0.66) and tightens the switch
+  // bar to preserve the lead; explicit safe keeps its exact threshold.
+  const state = makeState({
+    ourActive: { species: 'Garchomp', hpPercent: 100, moves: ['Earthquake'] },
+    ourBench: [
+      { species: 'Corviknight', hpPercent: 100, moves: ['Brave Bird'] },
+      { species: 'Blissey', hpPercent: 100, moves: ['Seismic Toss'] },
+    ],
+    theirActive: { species: 'Gliscor', hpPercent: 10, moves: ['Earthquake'] },
+  });
+  const auto = recommend(state);
+  assert.equal(auto.risk.mode, 'safe');
+  assert.equal(auto.risk.switchBar, 6, 'deep ahead, the bar tightens (safe 8 × 0.75)');
+  const explicit = recommend(state, { riskMode: 'safe' });
+  assert.equal(explicit.risk.switchBar, 8, 'explicit modes keep their exact thresholds');
+});
+
+// 2-ply opponent response engine (Phase 4)
+// ---------------------------------------------------------------------------
+
+// The response engine looks at the turn after each candidate move: if it
+// doesn't KO, what does their active do back (KO us, set up, or nothing)? If
+// it does KO, what comes in and can we handle it? Each branch is pinned below
+// with the votes it produces.
+
+const respMon = (species, hpPercent = 100, moves = [], ident = 'x') => {
+  const m = createPokemon({ ident, side: 'p1', species, level: 100 });
+  m.hpPercent = hpPercent;
+  for (const mv of moves) addMove(m, mv);
+  return m;
+};
+const respField = buildField(createBattleState());
+
+const evalResp = (us, moveName, them, bench = [], switchProbs = {}) =>
+  evaluateMove(us, moveName, them, [them, ...bench], 1, switchProbs, 9, respField, {});
+
+test('evaluateMove: the 2-ply engine penalizes a move that lets their active KO us back', () => {
+  // Seismic Toss (~31%, fixed) can't finish a full Dragonite; its Outrage
+  // KOs our 30% Blissey the turn after — a losing trade even if we move
+  // first.
+  const us = respMon('Blissey', 30, ['Seismic Toss']);
+  const them = respMon('Dragonite', 100, ['Outrage']);
+  const ev = evalResp(us, 'Seismic Toss', them);
+  assert.ok(ev.votes.response < 0, `the KO-back should read as a bad trade, got ${ev.votes.response}`);
+  assert.ok(ev.note.includes('KOs you back'), `the note names the counter, got: ${ev.note}`);
+});
+
+test('evaluateMove: the 2-ply engine penalizes a move that lets their active set up', () => {
+  // Earthquake is immune vs Dragonite (no KO); it survives and Dragon Dance
+  // is revealed and unused — the sweep is coming.
+  const us = respMon('Garchomp', 100, ['Earthquake']);
+  const them = respMon('Dragonite', 100, ['Dragon Dance', 'Outrage']);
+  const ev = evalResp(us, 'Earthquake', them);
+  assert.ok(ev.votes.response < 0, `the setup reply should be penalized, got ${ev.votes.response}`);
+  assert.ok(ev.note.includes('sets up (Dragon Dance revealed)'), `the note names the setup, got: ${ev.note}`);
+  // No setup move, no KO-back, no weak reply → no response vote at all.
+  // (Their Garchomp's EQ trades ~33% back — mid-threat, not punishable-free
+  // and not a KO.)
+  const neutral = respMon('Garchomp', 100, ['Earthquake']);
+  const ev2 = evalResp(us, 'Earthquake', neutral);
+  assert.equal(ev2.votes.response, 0, 'a mid-threat reply reads neutral');
+});
+
+test('evaluateMove: the 2-ply engine rewards a move they cannot punish', () => {
+  // Blissey only has Thunder Wave shown — nothing to hit back with.
+  const us = respMon('Garchomp', 100, ['Earthquake']);
+  const them = respMon('Blissey', 100, ['Thunder Wave']);
+  const ev = evalResp(us, 'Earthquake', them);
+  assert.ok(ev.votes.response > 0, `a free hit should read positive, got ${ev.votes.response}`);
+  assert.ok(ev.note.includes("can't punish it"), `the note says we're free, got: ${ev.note}`);
+});
+
+test('evaluateMove: the 2-ply engine discounts a KO that brings in a counter', () => {
+  // Wood Hammer KOs Garchomp, but their most likely replacement Tornadus
+  // threatens Rillaboom for ~163% — the KO trades into a worse spot.
+  const us = respMon('Rillaboom', 100, ['Wood Hammer']);
+  const bench = respMon('Tornadus', 100, ['Hurricane'], 'p2b: Tornadus');
+  const them = respMon('Garchomp', 10, ['Earthquake'], 'p2a: Garchomp');
+  const ev = evalResp(us, 'Wood Hammer', them, [bench], { 'p2b: Tornadus': 1 });
+  assert.ok(ev.ko, 'the move does KO the active');
+  assert.ok(ev.votes.response < 0, `the counter should discount the KO, got ${ev.votes.response}`);
+  assert.ok(ev.note.includes('brings in Tornadus'), `the note names the counter, got: ${ev.note}`);
+});
+
+test('evaluateMove: the 2-ply engine rewards a KO whose likely replacement we beat', () => {
+  // Fire Blast KOs Ferrothorn; their likely switch-in Scizor is 4× weak to
+  // it — the KO sets up a favorable position.
+  const us = respMon('Charizard', 100, ['Fire Blast']);
+  const bench = respMon('Scizor', 100, ['Bullet Punch'], 'p2b: Scizor');
+  const them = respMon('Ferrothorn', 30, ['Gyro Ball'], 'p2a: Ferrothorn');
+  const ev = evalResp(us, 'Fire Blast', them, [bench], { 'p2b: Scizor': 1 });
+  assert.ok(ev.ko, 'the move does KO the active');
+  assert.ok(ev.votes.response > 0, `beating the replacement should read positive, got ${ev.votes.response}`);
+  assert.ok(ev.note.includes('beats the likely Scizor'), `the note names the beat, got: ${ev.note}`);
+});
+
+test('recommend: the 2-ply read surfaces in the reasoning (KO brings in a counter)', () => {
+  const state = makeState({
+    ourActive: { species: 'Rillaboom', hpPercent: 100, moves: ['Wood Hammer'] },
+    theirActive: { species: 'Garchomp', hpPercent: 10, moves: ['Earthquake'] },
+    theirBench: [{ species: 'Tornadus', hpPercent: 100, moves: ['Hurricane'] }],
+  });
+  const rec = recommend(state);
+  assert.equal(rec.bestMove.move, 'Wood Hammer');
+  assert.ok(
+    rec.reasoning.some((r) => r.includes('brings in Tornadus')),
+    `the counter read should be in the reasoning, got: ${JSON.stringify(rec.reasoning)}`
+  );
+  assert.ok(rec.bestMove.votes.response != null, 'the committee votes carry the response engine');
+});
+
 test('evaluateMove: risky KO is rewarded by aggressive, discounted by safe', () => {
   // Gengar Thunderbolt vs Toxapex at 45%: rolls 40.1-47.4, so the KO is real
   // but NOT guaranteed (min 40.1 < 45).
@@ -1086,14 +1371,16 @@ test('evaluateMove: risky setup is acceptable when aggressive, near-useless when
 });
 
 test('recommend: the switch bar depends on the mode (safe switches eagerly, aggressive stays)', () => {
-  // Scizor vs Dragonite with Toxapex on the bench: the switch nets ~12.8 (the
-  // revealed Outrage + being outsped count against it) — above safe's bar (8)
-  // and normal's (12), below aggressive's (16).
+  // Gliscor vs Dragonite (all 4 revealed) with Toxapex on the bench: the
+  // switch nets ~15.5 (the revealed Outrage/Fire Punch count against it) —
+  // above safe's bar (8) and normal's (12), below aggressive's (16). Under
+  // the EV hidden-move read this stays genuinely marginal: everything is
+  // revealed, so the net is the honest defensive gain, not speculative.
   const state = makeState({
-    ourActive: { species: 'Scizor', hpPercent: 100, moves: ['Bullet Punch', 'U-turn'] },
+    ourActive: { species: 'Gliscor', hpPercent: 100, moves: ['Earthquake', 'Knock Off'] },
     ourBench: [{ species: 'Toxapex', hpPercent: 100, moves: ['Liquidation', 'Toxic'] }],
-    theirActive: { species: 'Dragonite', hpPercent: 100, moves: ['Outrage'] },
-    theirBench: [{ species: 'Gliscor', hpPercent: 100, moves: ['Earthquake'] }],
+    theirActive: { species: 'Dragonite', hpPercent: 100, moves: ['Outrage', 'Earthquake', 'Fire Punch', 'Ice Spinner'] },
+    theirBench: [{ species: 'Garchomp', hpPercent: 100, moves: ['Earthquake'] }],
   });
   const rec = (mode) => recommend(state, { riskMode: mode });
   const safe = rec('safe');
@@ -1115,7 +1402,10 @@ test('recommend: a switch-in that KOs their active with a super-effective move i
     ],
     theirActive: { species: 'Garchomp', hpPercent: 100, moves: ['Earthquake'] },
   });
-  const rec = recommend(state, { riskMode: 'normal' });
+  // sets: false — real-spread Garchomp (0 SpD for the def-phys read would
+  // actually make this a roll KO; the controlled model pins the guaranteed
+  // 4× KO that this test's framing depends on.
+  const rec = recommend(state, { riskMode: 'normal', sets: false });
   assert.equal(rec.switchTo?.species, 'Weavile', 'the guaranteed KO is the play, not the wall');
   assert.ok(rec.switchTo.note.includes('guaranteed KO'), `got: ${rec.switchTo.note}`);
 });
@@ -1187,6 +1477,124 @@ test('endgameLocks stays quiet outside the endgame (teams still full)', () => {
   assert.equal(endgameLocks(state.sides.p1.pokemon, state.sides.p2.pokemon, 9, new Field(), {}, state, 'p1').length, 0);
   const rec = recommend(state);
   assert.ok(!rec.reasoning.some((r) => r.includes('Endgame')), 'no endgame talk with full teams');
+});
+
+// ---------------------------------------------------------------------------
+// Endgame checkmate search
+// ---------------------------------------------------------------------------
+
+// All checkmate scenarios reveal all 4 moves of both sides: the checkmate
+// search prices their hidden worst case (duelRace uses theirBestHit, which
+// folds in worstThreat), so an unrevealed coverage nuke correctly blocks a
+// false "forced win" claim. Tests that want the forcing line to fire must
+// therefore fully reveal the opponent.
+
+test('checkmate: ko-now when their last mon falls to our active', () => {
+  const state = makeState({
+    ourActive: { species: 'Rillaboom', hpPercent: 70, moves: ['Wood Hammer', 'Grassy Glide', 'Knock Off', 'U-turn'], ability: 'Grassy Surge' },
+    theirActive: { species: 'Garchomp', hpPercent: 40, status: 'brn', moves: ['Earthquake', 'Outrage', 'Fire Fang', 'Swords Dance'], ability: 'Rough Skin', item: 'Leftovers' },
+  });
+  const cm = endgameCheckmate(state.sides.p1.pokemon, state.sides.p2.pokemon, state.sides.p1.pokemon[0], 9, new Field(), {}, state, 'p1');
+  assert.equal(cm?.mate?.kind, 'ko-now');
+  assert.equal(cm.mate.target, 'Garchomp');
+  assert.ok(cm.mate.note.includes('Checkmate'), 'note should flag the forced win');
+  assert.equal(cm.threat, null, 'no threat read when we have the mate');
+});
+
+test('checkmate: duel when a bench piece wins the 1v1 after the entry hit', () => {
+  const state = makeState({
+    ourActive: { species: 'Corviknight', hpPercent: 30, moves: ['Body Press', 'Roost', 'Brave Bird', 'U-turn'], ability: 'Pressure' },
+    ourBench: [{ species: 'Clefable', hpPercent: 100, moves: ['Moonblast', 'Thunder Wave', 'Soft-Boiled', 'Stealth Rock'], ability: 'Magic Guard' }],
+    theirActive: { species: 'Dragapult', hpPercent: 100, moves: ['Draco Meteor', 'Shadow Ball', 'U-turn', 'Thunderbolt'], ability: 'Infiltrator' },
+  });
+  const cm = endgameCheckmate(state.sides.p1.pokemon, state.sides.p2.pokemon, state.sides.p1.pokemon[0], 9, new Field(), {}, state, 'p1');
+  assert.equal(cm?.mate?.kind, 'duel');
+  assert.equal(cm.mate.piece, 'Clefable');
+  assert.ok(cm.mate.note.includes('switch to Clefable'), 'note should name the switch-in');
+});
+
+test('checkmate: ko-then when the replacement is beaten by a piece of ours', () => {
+  const state = makeState({
+    ourActive: { species: 'Rillaboom', hpPercent: 70, moves: ['Wood Hammer', 'Grassy Glide', 'Knock Off', 'U-turn'], ability: 'Grassy Surge' },
+    ourBench: [{ species: 'Weavile', hpPercent: 100, moves: ['Icicle Crash', 'Knock Off', 'Ice Shard', 'Low Kick'] }],
+    theirActive: { species: 'Garchomp', hpPercent: 40, status: 'brn', moves: ['Earthquake', 'Outrage', 'Fire Fang', 'Swords Dance'], ability: 'Rough Skin', item: 'Leftovers' },
+    theirBench: [{ species: 'Gliscor', hpPercent: 100, moves: ['Earthquake', 'Knock Off', 'Protect', 'Toxic'], ability: 'Poison Heal', item: 'Toxic Orb' }],
+  });
+  const cm = endgameCheckmate(state.sides.p1.pokemon, state.sides.p2.pokemon, state.sides.p1.pokemon[0], 9, new Field(), {}, state, 'p1');
+  assert.equal(cm?.mate?.kind, 'ko-then');
+  assert.equal(cm.mate.target, 'Garchomp');
+  assert.equal(cm.mate.replacement, 'Gliscor');
+  assert.ok(cm.mate.note.includes('KO their Garchomp now'), 'note should order the KO now');
+});
+
+test('checkmate: sac when our active chips their current into a bench mate range', () => {
+  const state = makeState({
+    ourActive: { species: 'Corviknight', hpPercent: 100, moves: ['Body Press', 'Brave Bird', 'Roost', 'U-turn'], ability: 'Pressure', item: 'Leftovers' },
+    ourBench: [{ species: 'Garchomp', hpPercent: 100, moves: ['Earthquake', 'Dragon Claw', 'Stone Edge', 'Swords Dance'], ability: 'Rough Skin', item: 'Choice Scarf' }],
+    theirActive: { species: 'Garchomp', hpPercent: 55, moves: ['Earthquake', 'Dragon Claw', 'Stone Edge', 'Swords Dance'], ability: 'Rough Skin', item: 'Leftovers' },
+    theirBench: [{ species: 'Dragapult', hpPercent: 100, moves: ['Draco Meteor', 'Shadow Ball', 'U-turn', 'Thunderbolt'], ability: 'Infiltrator' }],
+  });
+  const cm = endgameCheckmate(state.sides.p1.pokemon, state.sides.p2.pokemon, state.sides.p1.pokemon[0], 9, new Field(), {}, state, 'p1');
+  assert.equal(cm?.mate?.kind, 'sac');
+  assert.equal(cm.mate.piece, 'Garchomp');
+  assert.ok(cm.mate.note.includes('sac your Corviknight'), 'note should order the sac');
+});
+
+test('checkmate: threat when their current KOs our active and their last mon beats everyone', () => {
+  const state = makeState({
+    ourActive: { species: 'Weavile', hpPercent: 100, moves: ['Icicle Crash', 'Knock Off', 'Ice Shard', 'Low Kick'], ability: 'Pressure', item: 'Focus Sash' },
+    ourBench: [{ species: 'Gliscor', hpPercent: 100, moves: ['Earthquake', 'Knock Off', 'Protect', 'Toxic'], ability: 'Poison Heal', item: 'Toxic Orb' }],
+    theirActive: { species: 'Garchomp', hpPercent: 100, moves: ['Earthquake', 'Outrage', 'Fire Fang', 'Swords Dance'], ability: 'Rough Skin', item: 'Leftovers' },
+    theirBench: [{ species: 'Dragonite', hpPercent: 100, moves: ['Outrage', 'Earthquake', 'Fire Punch', 'Roost'], ability: 'Multiscale', item: 'Leftovers' }],
+  });
+  const cm = endgameCheckmate(state.sides.p1.pokemon, state.sides.p2.pokemon, state.sides.p1.pokemon[0], 9, new Field(), {}, state, 'p1');
+  assert.equal(cm?.mate, null, 'no mate when their line is the forcing one');
+  assert.equal(cm?.threat?.sweeper, 'Dragonite');
+  assert.ok(cm.threat.note.includes("you're on a clock"), 'note should warn of the clock');
+});
+
+test('checkmate: hidden-move honesty — an unrevealed nuke blocks a false forced-win claim', () => {
+  // Same board as the ko-then test, but their Gliscor's fourth move is
+  // UNREVEALED. worstThreat finds hidden hits (Brick Break ~114% on Weavile,
+  // Gunk Shot ~57% on Rillaboom), so the search must refuse to claim the
+  // forced win entirely — a mate it would have claimed with full knowledge.
+  const state = makeState({
+    ourActive: { species: 'Rillaboom', hpPercent: 70, moves: ['Wood Hammer', 'Grassy Glide', 'Knock Off', 'U-turn'], ability: 'Grassy Surge' },
+    ourBench: [{ species: 'Weavile', hpPercent: 100, moves: ['Icicle Crash', 'Knock Off', 'Ice Shard', 'Low Kick'] }],
+    theirActive: { species: 'Garchomp', hpPercent: 40, status: 'brn', moves: ['Earthquake', 'Outrage', 'Fire Fang', 'Swords Dance'], ability: 'Rough Skin', item: 'Leftovers' },
+    theirBench: [{ species: 'Gliscor', hpPercent: 100, moves: ['Earthquake', 'Knock Off', 'Protect'], ability: 'Poison Heal', item: 'Toxic Orb' }],
+  });
+  const cm = endgameCheckmate(state.sides.p1.pokemon, state.sides.p2.pokemon, state.sides.p1.pokemon[0], 9, new Field(), {}, state, 'p1');
+  assert.equal(cm, null, 'the unrevealed nuke must block the mate the fully-revealed board claimed');
+});
+
+test('checkmate: quiet outside the endgame (4+ of their mons alive)', () => {
+  const state = makeState({
+    ourActive: { species: 'Rillaboom', hpPercent: 70, moves: ['Wood Hammer', 'Grassy Glide', 'Knock Off', 'U-turn'] },
+    ourBench: [{ species: 'Weavile', hpPercent: 100, moves: ['Icicle Crash', 'Knock Off', 'Ice Shard', 'Low Kick'] }],
+    theirActive: { species: 'Garchomp', hpPercent: 40, status: 'brn', moves: ['Earthquake', 'Outrage', 'Fire Fang', 'Swords Dance'] },
+    theirBench: [
+      { species: 'Gliscor', hpPercent: 100, moves: ['Earthquake', 'Knock Off', 'Protect', 'Toxic'] },
+      { species: 'Dragapult', hpPercent: 100, moves: ['Draco Meteor', 'Shadow Ball', 'U-turn', 'Thunderbolt'] },
+      { species: 'Kingambit', hpPercent: 100, moves: ['Sucker Punch', 'Iron Head', 'Kowtow Cleave', 'Swords Dance'] },
+    ],
+  });
+  assert.equal(endgameCheckmate(state.sides.p1.pokemon, state.sides.p2.pokemon, state.sides.p1.pokemon[0], 9, new Field(), {}, state, 'p1'), null);
+  const rec = recommend(state);
+  assert.ok(!rec.reasoning.some((r) => r.includes('Checkmate')), 'no checkmate talk with full teams');
+});
+
+test('recommend: checkmate line surfaces in the reasoning', () => {
+  const state = makeState({
+    ourActive: { species: 'Rillaboom', hpPercent: 70, moves: ['Wood Hammer', 'Grassy Glide', 'Knock Off', 'U-turn'], ability: 'Grassy Surge' },
+    theirActive: { species: 'Garchomp', hpPercent: 40, status: 'brn', moves: ['Earthquake', 'Outrage', 'Fire Fang', 'Swords Dance'], ability: 'Rough Skin', item: 'Leftovers' },
+  });
+  state.turn = 8;
+  const rec = recommend(state);
+  assert.ok(
+    rec.reasoning.some((r) => r.includes('Checkmate')),
+    `expected a checkmate line, got: ${JSON.stringify(rec.reasoning)}`
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -1411,7 +1819,10 @@ test('items: clicking a super-effective move into a revealed Weakness Policy is 
     ourActive: { species: 'Milotic', moves: ['Ice Beam', 'Scald'] },
     theirActive: { species: 'Dragonite', hpPercent: 100, moves: ['Outrage', 'Earthquake'], item: 'Weakness Policy' },
   });
-  const rec = recommend(state);
+  // sets: false — real-spread Dragonite runs 0 SpD, so Milotic's Ice Beam
+  // OHKOs it (121%) and the WP never triggers; the flat model's 2HKO is what
+  // exercises the warning. (The real-set OHKO is covered by the KO test.)
+  const rec = recommend(state, { sets: false });
   assert.ok(
     rec.reasoning.some((r) => r.includes('triggers their Weakness Policy')),
     `expected a Weakness Policy warning, got: ${JSON.stringify(rec.reasoning)}`
@@ -1502,9 +1913,173 @@ test('race: counts their hidden worst move (full, not discounted) in per-turn da
   const line = rec.reasoning.find((r) => r.includes('Race check'));
   assert.ok(line, `expected a race warning, got: ${JSON.stringify(rec.reasoning)}`);
   assert.ok(line.includes('Brick Break'), `the race should name the hidden move: ${line}`);
+  // The point is the race runs on the FULL hidden hit, not the discounted
+  // ~53% revealed Earthquake alone.
   assert.ok(line.includes('~107.6%'), `the per-turn damage should be the FULL hidden hit: ${line}`);
   assert.ok(
     line.includes('1 turn'),
     `at ~108%/turn on 40% HP the finish is immediate: ${line}`
   );
+});
+
+test('engine: votes sum to the score and carry the calc engine (the committee)', () => {
+  // The score is the blend of the committee's votes — the calc (damage)
+  // engine, KO, speed, and context. They must sum exactly to the score and
+  // the calc vote must be the dominant term for a damage move.
+  const state = makeState({
+    ourActive: { species: 'Charizard', hpPercent: 100, moves: ['Fire Blast'] },
+    theirActive: { species: 'Ferrothorn', hpPercent: 100, moves: ['Gyro Ball'] },
+  });
+  const field = buildField(state);
+  const us = state.sides.p1.pokemon[0];
+  const them = state.sides.p2.pokemon[0];
+  const ev = evaluateMove(us, 'Fire Blast', them, [them], 1, {}, 9, field, {});
+  assert.ok(ev.votes, 'damage moves carry committee votes');
+  assert.equal(
+    Math.round((ev.votes.calc + ev.votes.ko + ev.votes.speed + ev.votes.context) * 10) / 10,
+    ev.score,
+    'the blended votes must equal the score'
+  );
+  assert.ok(ev.votes.calc > 0, 'the calc engine carries the damage');
+  assert.ok(ev.votes.calc >= ev.votes.ko, 'the calc engine dominates the KO vote');
+  // A status move routes its whole value through the context engine.
+  const status = makeState({
+    ourActive: { species: 'Chansey', hpPercent: 100, moves: ['Thunder Wave'] },
+    theirActive: { species: 'Gliscor', hpPercent: 100, moves: ['Earthquake'] },
+  });
+  const fieldS = buildField(status);
+  const usS = status.sides.p1.pokemon[0];
+  const themS = status.sides.p2.pokemon[0];
+  const evS = evaluateMove(usS, 'Thunder Wave', themS, [themS], 1, {}, 9, fieldS, {});
+  assert.equal(evS.votes.calc, 0, 'status moves have no damage vote');
+  assert.ok(evS.votes.context > 0, 'status value lives in the context vote');
+});
+
+test('engine: agreement is engine-weight-weighted (calc engine has the biggest say)', () => {
+  // Two moves where only the calc engine differs — the winner must read as a
+  // strong agreement because the calc vote is weighted 3× the speed/context.
+  const a = { votes: { calc: 60, ko: 10, speed: 0, context: 0, response: 0 } };
+  const b = { votes: { calc: 40, ko: 10, speed: 0, context: 0, response: 0 } };
+  // a wins calc (weight 3), ties ko/speed/context/response (half each):
+  // (3 + 2.5) / 8 = 0.6875 — calc weight dominates.
+  assert.equal(engineAgreement(a, b), 5.5 / 8, 'a wins calc, ties the rest — calc weight dominates');
+  // Disagree everywhere: split votes should read as half agreement.
+  const c = { votes: { calc: 60, ko: 10, speed: 0, context: 0, response: 0 } };
+  const d = { votes: { calc: 40, ko: 20, speed: 5, context: 5, response: 5 } };
+  const agree = engineAgreement(c, d);
+  assert.ok(agree > 0 && agree < 1, `a mixed verdict should read partial: ${agree}`);
+  // A pure tie on every engine is half credit.
+  assert.equal(engineAgreement(a, { ...a }), 0.5);
+});
+
+test('engine: confidence reflects committee agreement, not raw score share', () => {
+  // Two strong moves where one clearly wins: Fire Blast (4×) vs Air Slash
+  // (1×) on Ferrothorn. Old share formula gave ~78%; a 90-vs-85 pair would
+  // have read 51% despite an obvious winner. Agreement must push it high.
+  const state = makeState({
+    ourActive: { species: 'Charizard', hpPercent: 100, moves: ['Fire Blast', 'Air Slash'] },
+    theirActive: { species: 'Ferrothorn', hpPercent: 100, moves: ['Gyro Ball'] },
+  });
+  const rec = recommend(state);
+  assert.ok(
+    rec.bestMove.confidence >= 85,
+    `a 4× winner should read high confidence, got ${rec.bestMove.confidence}`
+  );
+  assert.ok(rec.bestMove.confidence <= 100);
+  assert.ok(rec.bestMove.votes, 'the recommended move carries its committee votes');
+});
+
+test('engine: the committee votes appear in the reasoning list, not just the tooltip', () => {
+  const state = makeState({
+    ourActive: { species: 'Charizard', hpPercent: 100, moves: ['Fire Blast', 'Air Slash'] },
+    theirActive: { species: 'Ferrothorn', hpPercent: 100, moves: ['Gyro Ball'] },
+  });
+  const rec = recommend(state);
+  const line = rec.reasoning.find((r) => r.startsWith('Committee on Fire Blast:'));
+  assert.ok(line, `expected a committee line, got: ${JSON.stringify(rec.reasoning)}`);
+  assert.ok(line.includes('calc '), `the line names the calc engine: ${line}`);
+  assert.ok(line.includes('KO '), `the line names the KO engine: ${line}`);
+  assert.ok(line.includes('speed '), `the line names the speed engine: ${line}`);
+  assert.ok(line.includes('context '), `the line names the context engine: ${line}`);
+  assert.ok(line.includes('response '), `the line names the 2-ply response engine: ${line}`);
+  // The line must live inside the 9-line budget (not sliced off) and its
+  // calc vote must match the move's own committee votes.
+  assert.ok(rec.reasoning.length <= 9);
+  assert.ok(line.includes(`score ${rec.bestMove.score}`), `the line ends with the blended score: ${line}`);
+});
+
+test('engine: a genuine coin flip between equal moves reads middling, not 100%', () => {
+  // Air Slash vs Aerial Ace on a neutral target are nearly identical — the
+  // engine should NOT claim a confident pick (and the panel tooltip shows
+  // why via the votes).
+  const state = makeState({
+    ourActive: { species: 'Charizard', hpPercent: 100, moves: ['Air Slash', 'Aerial Ace'] },
+    theirActive: { species: 'Umbreon', hpPercent: 100, moves: ['Foul Play'] },
+  });
+  const rec = recommend(state);
+  assert.ok(
+    rec.bestMove.confidence < 90,
+    `a near-tie should not read as a sure thing, got ${rec.bestMove.confidence}`
+  );
+  assert.ok(
+    rec.bestMove.confidence >= 50,
+    `the top option still reads as preferred, got ${rec.bestMove.confidence}`
+  );
+});
+
+test('recommend: no switch into a mon their SHOWN move hits harder (defense-first gate)', () => {
+  // Blissey tanks Outrage (~59%); the benched Garchomp is 2×-weak to the
+  // same shown Outrage (~83%) — trading into that is a worse matchup. The
+  // offense bonus must not mask it: no switch.
+  const state = makeState({
+    ourActive: { species: 'Blissey', hpPercent: 100, moves: ['Soft-Boiled', 'Ice Beam'] },
+    ourBench: [{ species: 'Garchomp', hpPercent: 100, moves: ['Earthquake', 'Outrage'] }],
+    theirActive: { species: 'Garchomp', hpPercent: 100, moves: ['Outrage', 'Earthquake'] },
+  });
+  const rec = recommend(state);
+  assert.equal(rec.switchTo, null, 'a mon their shown move 2×-hits must not be sent in');
+});
+
+test('recommend: the defense-first gate still allows a KO-trade into a worse matchup', () => {
+  // Snorlax is dying and Weavile gets mauled by Earthquake too — but its
+  // Icicle Crash is a guaranteed 4× KO. A KO justifies the trade; the gate
+  // must not block it.
+  const state = makeState({
+    ourActive: { species: 'Snorlax', hpPercent: 30, moves: ['Body Slam'] },
+    ourBench: [{ species: 'Weavile', hpPercent: 100, moves: ['Icicle Crash'] }],
+    theirActive: { species: 'Garchomp', hpPercent: 100, moves: ['Earthquake'] },
+  });
+  const rec = recommend(state, { riskMode: 'normal', sets: false });
+  assert.equal(rec.switchTo?.species, 'Weavile', 'the guaranteed KO still wins over the gate');
+  assert.ok(rec.switchTo.note.includes('guaranteed KO'), `got: ${rec.switchTo.note}`);
+});
+
+test('engine: injectable committee weights change the blend (the tuning harness)', () => {
+  // Gengar's Shadow Ball KOs a low Clefable (the KO engine votes +10); a
+  // heavy KO weight must amplify that vote and shift the blended score.
+  // The exact ranking doesn't matter — what matters is that passing a
+  // different weight set CHANGES the scores, proving the harness can move
+  // the needle (scripts/tune-weights.js replays real battles across these).
+  const state = makeState({
+    ourActive: { species: 'Gengar', hpPercent: 100, moves: ['Shadow Ball', 'Sludge Bomb'] },
+    theirActive: { species: 'Clefable', hpPercent: 15, moves: ['Moonblast'] },
+  });
+  const base = recommend(state);
+  const boosted = recommend(state, {
+    engineWeights: { blend: { calc: 1, ko: 10, speed: 1, context: 1 }, agree: { calc: 3, ko: 2, speed: 1, context: 1 } },
+    rankedMoves: true,
+  });
+  // The scores must actually shift with the weights (the whole point of
+  // tunable weights) — and the default (all-1s blend) must equal the plain
+  // sum, i.e. the pre-committee behavior.
+  const baseScore = base.bestMove?.score ?? 0;
+  const boostedScore = boosted.bestMove?.score ?? 0;
+  assert.ok(boostedScore !== baseScore, 'changing the blend weights must change the scores');
+  // rankedMoves exposes the top-3 so the harness can measure containment.
+  assert.ok(Array.isArray(boosted.rankedMoves), 'rankedMoves is exposed when requested');
+  assert.ok(boosted.rankedMoves.length <= 3);
+  assert.equal(boosted.rankedMoves[0].move, boosted.bestMove.move, 'top-1 is the best move');
+  // Without the flag, no ranking leaks into the payload.
+  const plain = recommend(state);
+  assert.equal(plain.rankedMoves, undefined, 'rankedMoves stays hidden unless requested');
 });

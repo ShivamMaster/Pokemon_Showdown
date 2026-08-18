@@ -10,7 +10,9 @@
 //   4. the options page lists the learned profile,
 //   5. flipping the panel setting in storage hides/shows the panel live,
 //   6. item-condition plays (Focus Sash / Weakness Policy) show inline in the
-//      matchup Damage row, not just the reasoning.
+//      matchup Damage row, not just the reasoning,
+//   7. the confidence badge's tooltip shows the engine-committee breakdown
+//      (calc / KO / speed / context votes).
 //
 // Requires a build first: npm run build
 //
@@ -518,17 +520,20 @@ try {
     }
     results.itemSashNote = true;
 
-    // Weakness Policy: our Milotic's Ice Beam is 4× on their Dragonite but
-    // doesn't KO — clicking it triggers the +2, and the row must warn.
+    // Weakness Policy: our Iron Treads' Ice Spinner is 4× on their Garchomp
+    // but doesn't KO (~63% with real spreads) — clicking it triggers the +2,
+    // and the row must warn. (Milotic vs Dragonite used to fit here, but with
+    // real-set spreads Milotic's Ice Beam now OHKOs a 0-SpD Dragonite, which
+    // skips the note entirely.)
     await page.evaluate(() => {
       const battle = window.app?.curRoom?.battle;
       if (!battle || !Array.isArray(battle.stepQueue)) throw new Error('no battle stepQueue');
       battle.stepQueue.push(
-        '|switch|p1a: Milotic|Milotic|100/100',
-        '|switch|p2a: Dragonite|Dragonite|100/100',
-        '|move|p1a: Milotic|Ice Beam|p2a: Dragonite',
-        '|move|p2a: Dragonite|Outrage|p1a: Milotic',
-        '|item|p2a: Dragonite|Weakness Policy'
+        '|switch|p1a: Iron Treads|Iron Treads|100/100',
+        '|switch|p2a: Garchomp|Garchomp|100/100',
+        '|move|p1a: Iron Treads|Ice Spinner|p2a: Garchomp',
+        '|move|p2a: Garchomp|Earthquake|p1a: Iron Treads',
+        '|item|p2a: Garchomp|Weakness Policy'
       );
     });
     await page.waitForFunction(
@@ -544,6 +549,67 @@ try {
       throw new Error(`WP note missing from the Damage row: ${JSON.stringify(wpRow)}`);
     }
     results.itemWpNote = true;
+  });
+
+  // 5c. The confidence badge's tooltip shows the engine-committee breakdown:
+  // feed a matchup where the best move clearly wins (Garchomp's Earthquake
+  // is 4× on Heatran), then read the badge's title attribute — it must carry
+  // the calc / KO / speed / context votes, not just "how strongly preferred".
+  await step('engineVotes', async () => {
+    await page.evaluate(() => {
+      const battle = window.app?.curRoom?.battle;
+      if (!battle || !Array.isArray(battle.stepQueue)) throw new Error('no battle stepQueue');
+      battle.stepQueue.push(
+        '|switch|p1a: Garchomp|Garchomp|100/100',
+        '|switch|p2a: Heatran|Heatran|100/100',
+        '|move|p1a: Garchomp|Earthquake|p2a: Heatran',
+        '|move|p2a: Heatran|Lava Plume|p1a: Garchomp'
+      );
+    });
+    // Wait for the NEW matchup to render (the badge from the previous WP
+    // step would otherwise satisfy an early wait): Earthquake must be the
+    // recommended move before reading the tooltip.
+    await page.waitForFunction(
+      () => {
+        const row = document.querySelector('#psa-overlay .psa-rec-row');
+        return (row?.innerText ?? '').includes('Earthquake');
+      },
+      { timeout: 20000 }
+    );
+    const tip = await page.evaluate(() => {
+      const panel = document.querySelector('#psa-overlay .psa-panel');
+      const badge = panel?.querySelector('.psa-rec-conf');
+      const row = panel?.querySelector('.psa-rec-row');
+      const lis = [...(panel?.querySelectorAll('.psa-reasoning li') ?? [])];
+      return {
+        badgeText: badge?.textContent?.trim() ?? '',
+        title: badge?.getAttribute('title') ?? '',
+        bestMoveText: row?.innerText ?? '',
+        reasoningText: lis.map((li) => li.innerText).join(' | '),
+      };
+    });
+    results.engineVotes = tip;
+    // The badge must name the moves and the tooltip must break the score into
+    // the committee's votes — a 4× Earthquake should be the confident pick.
+    if (!tip.bestMoveText.includes('Earthquake')) {
+      throw new Error(`Earthquake should be the recommended move: ${JSON.stringify(tip)}`);
+    }
+    if (!/\d+%/.test(tip.badgeText)) {
+      throw new Error(`no confidence percentage on the best move: ${JSON.stringify(tip)}`);
+    }
+    for (const vote of ['calc', 'KO', 'speed', 'context', 'response']) {
+      if (!tip.title.includes(vote)) {
+        throw new Error(`tooltip missing the ${vote} engine vote: ${JSON.stringify(tip)}`);
+      }
+      // The same breakdown must ALSO be in the reasoning list, not just the
+      // tooltip — the votes are part of the visible advice.
+      if (!tip.reasoningText.includes(vote)) {
+        throw new Error(`reasoning list missing the ${vote} engine vote: ${JSON.stringify(tip)}`);
+      }
+    }
+    if (!tip.reasoningText.includes('Committee on Earthquake')) {
+      throw new Error(`reasoning list missing the committee line: ${JSON.stringify(tip)}`);
+    }
   });
 
   // 6. Friend aliases: seed a profile named "John" with "vkhss" as an alias;

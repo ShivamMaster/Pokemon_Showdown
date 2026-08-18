@@ -23,10 +23,49 @@
 
 import { SPECIES, MOVES, Move } from '@smogon/calc';
 import { damagePercent, buildField, fieldAfter, round1, effectivenessOf, inferOffensiveStat } from './calc.js';
-import { worstThreat, teamThreats } from './movepool.js';
+import { worstThreat, expectedThreat, teamThreats, RECOVERY_MOVES } from './movepool.js';
+import { positionalWinProb } from './position.js';
 import { speedOrder, speedLine, movePriority } from './speed.js';
 
 const clamp01 = (n) => Math.max(0, Math.min(1, n));
+
+// Engine committee weights. Two shapes, one set of knobs:
+//   blend — how each engine's vote scales into the move's final score
+//           (the ranking). `calc` is the anchor (its 0-100 damage vote is
+//           the base), so the other weights tune how much the supporting
+//           engines move the needle relative to the damage read. All 1s =
+//           the plain unweighted sum (the pre-committee behavior).
+//   agree — how much each engine's independent vote counts toward the
+//           confidence read (ties split half credit).
+// The engines: calc (damage), ko (finishing reward), speed (order/priority
+// risk), context (situational: items, chip, utility), response (the 2-ply
+// read: what their best reply does to the resulting position). Missing keys
+// default to 1 in the blend, so the tuning script's older 4-key configs
+// stay valid — they implicitly weight the response engine at 1.
+// The default was chosen by replaying a batch of real battles under
+// different settings and keeping the one that matched what the players
+// actually did most often (see scripts/tune-weights.js).
+const ENGINE_WEIGHTS = {
+  blend: { calc: 1, ko: 1, speed: 1, context: 1, response: 1 },
+  agree: { calc: 3, ko: 2, speed: 1, context: 1, response: 1 },
+};
+
+// Share of engine weight that ranks move `a` above move `b` (ties split
+// half credit). Returns 1 when every engine prefers `a`, ~0.5 when they
+// disagree or tie, 0 when none do. `weights` defaults to the tuned set but
+// is injectable so the tuning script can compare candidates.
+export function engineAgreement(a, b, weights = ENGINE_WEIGHTS.agree) {
+  let agree = 0;
+  let total = 0;
+  for (const [name, w] of Object.entries(weights)) {
+    const av = a?.votes?.[name] ?? 0;
+    const bv = b?.votes?.[name] ?? 0;
+    total += w;
+    if (av > bv) agree += w;
+    else if (av === bv) agree += w / 2; // tie → half credit
+  }
+  return total > 0 ? agree / total : 0;
+}
 
 // Weather/terrain-setting moves -> the field condition they set (canonical
 // calc names, matching what buildField normalizes the reader's names to).
@@ -72,10 +111,6 @@ const TERRAIN_SPEED_ABILITIES = {
 const SETUP_MOVES = new Set([
   'Swords Dance', 'Dragon Dance', 'Nasty Plot', 'Calm Mind', 'Bulk Up',
   'Quiver Dance', 'Agility', 'Iron Defense', 'Tail Glow', 'Shell Smash',
-]);
-const RECOVERY_MOVES = new Set([
-  'Recover', 'Roost', 'Soft-Boiled', 'Slack Off', 'Synthesis', 'Moonlight',
-  'Morning Sun', 'Shore Up', 'Strength Sap', 'Rest', 'Heal Order',
 ]);
 const STATUS_MOVES = new Set([
   'Will-O-Wisp', 'Thunder Wave', 'Toxic', 'Spore', 'Sleep Powder',
@@ -311,7 +346,7 @@ export function moveConditionalSwitchProbs(moveName, switchProbs, theirTeam, gen
 // Move evaluation
 // ---------------------------------------------------------------------------
 
-export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayProb, switchProbs, gen, field, calcOpts = {}, speed = null, hazards = null, risk = null) {
+export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayProb, switchProbs, gen, field, calcOpts = {}, speed = null, hazards = null, risk = null, weights = null) {
   const vsTarget = damagePercent(gen, attacker, theirTarget, moveName, field, calcOpts);
   if (!vsTarget) return null;
 
@@ -435,6 +470,11 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
       score: round1(value * 100),
       kind: 'status',
       note: `${moveName}: ${note} (utility ${Math.round(value * 100)}/100)`,
+  // The status engine's whole vote lives in `context` (the utility value)
+  // — it has no damage, KO, speed, or 2-ply response component, so the
+  // committee sees a status move as "context engine only", which is exactly
+  // right.
+  votes: { calc: 0, ko: 0, speed: 0, context: Math.round(value * 100), response: 0 },
     };
   }
 
@@ -451,10 +491,22 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
   const targetHp = theirTarget.hpPercent ?? 100;
   // Cap damage at remaining HP so overkill gets no credit.
   const cappedActive = Math.min(vsTarget.mean, targetHp);
-  let score = stayProb * cappedActive;
+  // The engine committee: each independent engine votes on this move on its
+  // own scale, and the final score is the blend. Keeping the votes lets the
+  // confidence read be derived from how much the engines AGREE (see the
+  // confidence block in recommend), not just from raw score share.
+  //   calc    — the damage engine (@smogon/calc): expected damage vs the
+  //             active + predicted switch-ins, capped at remaining HP.
+  //   ko       — the KO engine: risk-aware reward for finishing the target.
+  //   speed    — the speed/priority engine: KO-first safety, outspeed risk.
+  //   context  — the situational engine: item plays, chip-finish, etc.
+  //   response — the 2-ply engine: their best reply to this move and what
+  //              the resulting position does to us (see the block below).
+  const votes = { calc: 0, ko: 0, speed: 0, context: 0, response: 0 };
+  votes.calc = stayProb * cappedActive;
   for (const b of benchDmg) {
     const capped = Math.min(b.dmg, b.dmg > 0 ? (theirTeam.find((m) => m.ident === b.ident)?.hpPercent ?? 100) : 0);
-    score += (benchProbs[b.ident] ?? 0) * capped;
+    votes.calc += (benchProbs[b.ident] ?? 0) * capped;
   }
 
   // Residual chip (burn/poison/weather) finishes a low target off without
@@ -500,12 +552,12 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
       wpNote = `⚠ ${moveName} triggers their Weakness Policy — their ${theirTarget.species} gets +2 and hits for ~${round1(boostedIn)}%`;
     }
   }
-  score -= wpPenalty;
+  votes.context -= wpPenalty;
   // Risk-aware KO reward: safe mode prefers the guaranteed roll (a gamble on
   // a non-guaranteed KO could hand the lead back), aggressive mode prefers
   // the swing (the 60% roll that wins if it lands is the comeback play).
   const r = risk ?? RISK_MODES.normal;
-  if (ko) score += r.koBonus(koGuaranteed);
+  if (ko) votes.ko += r.koBonus(koGuaranteed);
 
   // Speed-order awareness: going for the KO is much safer when we move first,
   // and much riskier when they outspeed us and can hit back before we act.
@@ -525,35 +577,95 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
       // We're faster — the KO is safe unless their priority move jumps the
       // queue and finishes us first.
       if (theirPrioKO && ourPrio < theirPrio.priority) {
-        score -= r.koedFirstPenalty;
+        votes.speed -= r.koedFirstPenalty;
         speedNote = `you outspeed, but their ${theirPrio.move} can KO you first (priority)`;
       } else {
-        score += r.koFirstBonus;
+        votes.speed += r.koFirstBonus;
         speedNote = 'you outspeed — safe to go for the KO';
       }
     } else if (speed.weMoveFirst === false) {
       const theirDmg = incomingPercent(theirTarget, attacker, gen, field, calcOpts).pct;
       // Our priority move strikes before their Speed advantage — the KO lands.
       if (ko && ourPrio > 0 && ourPrio >= (theirPrio?.priority ?? 1)) {
-        score += r.koFirstBonus;
+        votes.speed += r.koFirstBonus;
         speedNote = `they outspeed you, but ${moveName} has priority — you strike first`;
       } else if (theirPrioKO) {
-        score -= r.koedFirstPenalty;
+        votes.speed -= r.koedFirstPenalty;
         speedNote = `their ${theirPrio.move} can KO you first (priority beats Speed)`;
       } else if (theirDmg >= ourHp) {
-        score -= r.koedFirstPenalty;
+        votes.speed -= r.koedFirstPenalty;
         speedNote = `they outspeed and can KO you first (~${round1(theirDmg)}%)`;
       } else if (theirDmg >= 40) {
-        score -= r.outspeedHitPenalty;
+        votes.speed -= r.outspeedHitPenalty;
         speedNote = `they outspeed — expect ~${round1(theirDmg)}% back before you move`;
       }
     } else if (theirPrioKO) {
       // Speed is a toss-up, but their priority move isn't: it acts first
       // either way and can finish us.
-      score -= r.koedFirstPenalty;
+      votes.speed -= r.koedFirstPenalty;
       speedNote = `their ${theirPrio.move} can KO you first (priority)`;
     }
   }
+
+  // 2-ply response engine: what does their BEST reply to this move do to the
+  // resulting position? A one-ply engine scores "how good is this hit"; the
+  // response engine looks at the turn after. Two branches:
+  //   KO      — they send in their most likely replacement. If it threatens
+  //             us hard, the KO "brings in a counter" (a KO into a bad spot
+  //             is worth less than a clean one); if our next hit beats it,
+  //             the KO sets up a favorable position (bonus).
+  //   no KO   — their active survives. If it KOs us back, the move is a
+  //             losing trade even when we move first; if it sets up, we just
+  //             handed them the sweep; if it can't punish us, we're free.
+  // Scale is context-sized (±9) so the read nudges close calls without
+  // overpowering the damage anchor.
+  const theirIncoming = incomingPercent(theirTarget, attacker, gen, field, calcOpts).pct;
+  let response = 0;
+  let responseNote = null;
+  if (ko) {
+    // Their most likely replacement: the bench mon with the highest switch
+    // probability (the conditional split after a KO), falling back to the
+    // first bench mon when no probabilities are known.
+    const replacement =
+      bench.reduce((best, m) => {
+        const wp = switchProbs[m.ident] ?? 0;
+        return !best || wp > (switchProbs[best.ident] ?? 0) ? m : best;
+      }, null) ?? bench[0];
+    if (replacement) {
+      // expectedIncoming returns the % directly (a number), unlike
+      // incomingPercent's { pct } shape.
+      const repThreat = expectedIncoming(replacement, attacker, gen, field, calcOpts);
+      if (repThreat >= 50) {
+        response -= Math.min(8, (repThreat - 50) * 0.12);
+        responseNote = `brings in ${replacement.species} which threatens you ~${round1(repThreat)}%`;
+      }
+      const ourHit = bestDamageMove(attacker, replacement, gen, field, calcOpts);
+      if (ourHit && (ourHit.effectiveness >= 2 || ourHit.mean >= 60)) {
+        response += Math.min(4, ourHit.mean * 0.05);
+        responseNote = responseNote
+          ? `${responseNote} · but ${ourHit.move} beats it (~${round1(ourHit.mean)}%)`
+          : `and ${ourHit.move} beats the likely ${replacement.species} (~${round1(ourHit.mean)}%)`;
+      }
+    }
+  } else {
+    const theirSetupMove = (theirTarget.moves ?? []).find((m) => SETUP_MOVES.has(m));
+    const alreadyBoosted = (theirTarget.boosts?.atk ?? 0) >= 1 || (theirTarget.boosts?.spa ?? 0) >= 1;
+    if (theirIncoming >= ourHp) {
+      response -= Math.min(9, 4 + (theirIncoming - ourHp) * 0.15);
+      responseNote = `it survives and KOs you back (~${round1(theirIncoming)}%)`;
+    } else if (theirSetupMove && !alreadyBoosted) {
+      // Setting up into a mon that survives is handing them the sweep — the
+      // "KO it NOW before it sets up" warning, priced into the move.
+      response -= 6;
+      responseNote = `it survives and sets up (${theirSetupMove} revealed)`;
+    } else if ((theirTarget.moves?.length ?? 0) > 0 && theirIncoming < 25) {
+      // Only claimed when they've shown enough to justify it — an unrevealed
+      // mon could still be hiding a nuke.
+      response += 3;
+      responseNote = `they can't punish it (~${round1(theirIncoming)}% back)`;
+    }
+  }
+  votes.response = response;
 
   const effText = effLabel(vsTarget.effectiveness);
   const seHits = benchDmg.filter((b) => b.eff >= 2).map((b) => b.ident.split(': ')[1]).slice(0, 2);
@@ -567,8 +679,21 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
   if (ko) parts.push(koGuaranteed ? 'guaranteed KO' : chip < 0 ? 'can KO (chip finishes it)' : 'can KO');
   if (speedNote) parts.push(speedNote);
   if (wpNote) parts.push(wpNote);
+  if (responseNote) parts.push(responseNote);
   if (seHits.length) parts.push(`also hits ${seHits.join(', ')} super effectively`);
   const note = `${moveName}: ${parts.join(' · ')}`;
+  // The committee blend: each engine's vote scales into the final score by
+  // its weight. `calc` is the anchor (its 0-100 damage vote is the base), so
+  // a weight >1 on a supporting engine amplifies its say and <1 dampens it.
+  // Weights default to all-1s (the plain unweighted sum).
+  const w = weights?.blend ?? null;
+  const score = w
+    ? votes.calc +
+      (w.ko ?? 1) * votes.ko +
+      (w.speed ?? 1) * votes.speed +
+      (w.context ?? 1) * votes.context +
+      (w.response ?? 1) * votes.response
+    : votes.calc + votes.ko + votes.speed + votes.context + votes.response;
 
   return {
     move: moveName,
@@ -578,6 +703,13 @@ export function evaluateMove(attacker, moveName, theirTarget, theirTeam, stayPro
     koGuaranteed,
     expected: { min: vsTarget.min, max: vsTarget.max, mean: vsTarget.mean, effectiveness: vsTarget.effectiveness },
     note,
+    votes: {
+      calc: round1(votes.calc),
+      ko: round1(votes.ko),
+      speed: round1(votes.speed),
+      context: round1(votes.context),
+      response: round1(votes.response),
+    },
   };
 }
 
@@ -646,6 +778,19 @@ export function effectiveIncoming(theirActive, target, gen, field, calcOpts = {}
   const pot = worstThreat(theirActive, target, gen, field, calcOpts);
   const potIn = pot && pot.pct >= 50 ? pot.pct * 0.6 : 0;
   return Math.max(now.pct, potIn);
+}
+
+// Usage-weighted EXPECTED incoming damage % (revealed best + hidden EV), for
+// scoring nets. Unlike effectiveIncoming (the worst-case risk floor), this
+// prices hidden moves by how likely they actually are — a 2%-usage theorymon
+// coverage nuke stops outweighing the moves the species really runs, so
+// switches/moves into mons with known sets stop being over-penalized. The
+// worst case stays the floor for gates and warnings (effectiveIncoming /
+// worstThreat); this is the honest EV read for ranking.
+export function expectedIncoming(theirActive, target, gen, field, calcOpts = {}) {
+  const now = incomingPercent(theirActive, target, gen, field, calcOpts);
+  const ev = expectedThreat(theirActive, target, gen, field, calcOpts);
+  return Math.max(now.pct, ev?.pct ?? 0);
 }
 
 export function ownBestDamage(candidate, theirTarget, gen, field, calcOpts = {}) {
@@ -728,8 +873,15 @@ export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, ca
   // the worst discounted hidden move. Staying risks what they *could* have;
   // so does switching in, and a candidate that a hidden move mauls is exactly
   // the "sends in a Pokémon that is also weak" trap this guards against.
+  // The worst-case read (effectiveIncoming) drives the defense-first gate
+  // below — the risk floor. The net itself prices hidden moves by their
+  // usage-weighted EXPECTED damage (expectedIncoming), so a candidate only
+  // threatened by a 2%-usage theorymon coverage nuke isn't over-penalized
+  // when the species' real sets are known.
   const effectiveNow = effectiveIncoming(theirActive, ourActive, gen, field, calcOpts);
   const candEff = effectiveIncoming(theirActive, candidate, gen, field, calcOpts);
+  const evNow = expectedIncoming(theirActive, ourActive, gen, field, calcOpts);
+  const evCand = expectedIncoming(theirActive, candidate, gen, field, calcOpts);
   const nowPot = worstThreat(theirActive, ourActive, gen, field, calcOpts);
   // Offense is capped at the target's remaining HP (overkill gets no credit)
   // and weighed against the hits the candidate will eat — a switch-in that
@@ -751,8 +903,26 @@ export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, ca
   // in effectiveIncoming). A candidate weak to something they've already
   // SHOWN pays an extra penalty so certainty outweighs speculation — this is
   // what stops the engine sending in a mon their known coverage wrecks.
-  const revealedPenalty = cand.pct >= 40 ? cand.pct * 0.3 : 0;
-  let net = (effectiveNow - candEff) + candOff * 0.6 + koReward - hazardDmg - revealedPenalty;
+  // A candidate that threatens a KO is exempt: the defense-first rule already
+  // carves out the KO trade ("only a KO justifies the trade"), so charging
+  // the certainty penalty on top would double-count the punishment for a
+  // case the design has already decided is acceptable.
+  const revealedPenalty = cand.pct >= 40 && !candKo ? cand.pct * 0.3 : 0;
+  // Defense-first rule: if the candidate's TOTAL exposure (revealed best +
+  // discounted hidden worst) is meaningfully worse than our current mon's
+  // AND genuinely threatening, the switch makes the matchup worse — the
+  // offense bonus can't paper over that. Only a KO threat justifies trading
+  // into a worse position (the KO reward below still carries the swing); a
+  // non-KO switch into a worse matchup is exactly the "sends in a mon their
+  // coverage wrecks" trap this stops, even when the candidate hits back hard.
+  // (A small regression — taking 8% more while hitting back for 80% — is a
+  // fine trade, not this bug.)
+  const worseMatchup = candEff > effectiveNow + 5 && candEff >= 40;
+  let offCredit = candOff * 0.6;
+  if (worseMatchup && !candKo) offCredit = 0;
+  // The net trades on the expected (usage-weighted) incoming damage; the gate
+  // above stays on the worst case so the defense-first rule never weakens.
+  let net = (evNow - evCand) + offCredit + koReward - hazardDmg - revealedPenalty;
   if (net <= 0) return null;
   const theirMove = now.move ?? cand.move ?? 'their moves';
   let note =
@@ -770,6 +940,11 @@ export function evaluateSwitch(ourActive, candidate, theirActive, gen, field, ca
   }
   if (nowPot && nowPot.pct > now.pct) {
     note += `; their ${theirActive?.species} could hit ${ourActive.species} with ${nowPot.move} (~${round1(nowPot.pct)}%)`;
+  }
+  if (worseMatchup && candKo) {
+    note += `; their ${cand.move ?? 'moves'} hit ${candidate.species} harder than ${ourActive.species} (~${round1(cand.pct)}%) — only the KO justifies the trade`;
+  } else if (worseMatchup) {
+    note += `; but their ${theirMove} hits ${candidate.species} harder than ${ourActive.species} (~${round1(cand.pct)}%) — this switch loses the matchup`;
   }
 
   // Their active is a setup threat: a revealed setup move it hasn't used yet
@@ -848,12 +1023,27 @@ export function bestSwitchIn(ourTeam, theirActive, gen, field, profile = null, c
     const candKo = !!off && off.max >= targetHp;
     const candKoGuaranteed = !!off && off.min >= targetHp;
     const effIn = effectiveIncoming(theirActive, candidate, gen, field, calcOpts);
+    const evIn = expectedIncoming(theirActive, candidate, gen, field, calcOpts);
     // Entry hazards on our side hit every send-in before it acts.
     const hazardDmg = hazardDamageOnEntry(candidate, ourSide, gen);
-    const revealedPenalty = cand.pct >= 40 ? cand.pct * 0.3 : 0;
+    // Same KO exemption as the optional switch: a candidate that threatens a
+    // KO is already allowed through the defense-first gate, so charging the
+    // certainty penalty on top would double-count (see evaluateSwitch).
+    const revealedPenalty = cand.pct >= 40 && !candKo ? cand.pct * 0.3 : 0;
+    // Defense-first gate (forced send-in mirror of the optional switch): with
+    // no current mon to compare against, the rule is absolute — a candidate
+    // whose TOTAL exposure is genuinely threatening (≥40%, shown + hidden) is
+    // trading into a bad matchup, and the offense bonus can't paper over that
+    // unless it threatens a KO (the KO reward below still carries the swing).
+    // Otherwise the offense credit is zeroed, so the safest send-in wins.
+    // (Gate on the worst case; the net below prices the EXPECTED hidden
+    // damage, so a candidate threatened only by theorymon isn't tanked.)
+    const threatened = effIn >= 40;
+    let offCredit = candOff;
+    if (threatened && !candKo) offCredit = 0;
     // A forced send-in has no move this turn, so the KO is the whole play —
     // a candidate that can finish their active gets the balanced-mode reward.
-    const score = candOff + (candKo ? 13 : 0) - effIn - hazardDmg - revealedPenalty;
+    const score = offCredit + (candKo ? 13 : 0) - evIn - hazardDmg - revealedPenalty;
     if (score > bestScore) {
       bestScore = score;
       // Name the move behind the incoming number: the revealed best, or the
@@ -867,12 +1057,16 @@ export function bestSwitchIn(ourTeam, theirActive, gen, field, profile = null, c
         ident: candidate.ident,
         species: candidate.species,
         candIn: round1(effIn),
-        candOff: round1(candOff),
+        candOff: round1(offCredit),
         net: round1(score),
         note: `Send in ${candidate.species}: takes ~${round1(effIn)}% from ${threatName}` +
           `${hazardDmg > 0 ? `, plus ~${round1(hazardDmg)}% to hazards on entry` : ''}` +
-          `${candOff ? `, hits back for ~${round1(candOff)}%` : ''}` +
-          `${candKo ? (candKoGuaranteed ? ' — guaranteed KO' : ' — can KO') : ''}`,
+          `${offCredit ? `, hits back for ~${round1(offCredit)}%` : ''}` +
+          `${candKo ? (candKoGuaranteed ? ' — guaranteed KO' : ' — can KO') : ''}` +
+          // A KO-trade into a bad matchup is a deliberate call, not a blind
+          // send-in — say so (mirrors the optional switch's note). A pick
+          // that merely survives the threat best needs no such caveat.
+          `${threatened && candKo ? ` — only the KO justifies the ~${round1(effIn)}% it takes` : ''}`,
       };
     }
   }
@@ -924,6 +1118,10 @@ export function raceProjection(ourActive, theirActive, gen, field, calcOpts = {}
 // How far ahead (in %-HP equivalents) we must be to play safe / aggressive.
 const AHEAD_THRESHOLD = 100;
 const BEHIND_THRESHOLD = -100;
+// Positional mode thresholds: when the win-probability eval is this clearly
+// one-sided, play to the position even if the raw HP board looks even.
+const WIN_SAFE_AT = 0.66;
+const WIN_AGGRESSIVE_AT = 0.34;
 
 // Board advantage in %-HP equivalents: each side's total remaining HP across
 // alive mons plus a per-body bonus (an extra alive mon is worth a lot even at
@@ -989,11 +1187,19 @@ export const RISK_MODES = {
   },
 };
 
-// 'auto' derives the mode from the board: clearly ahead → safe, clearly
-// behind → aggressive, otherwise balanced. An explicit mode wins.
-export function resolveRiskMode(opts = {}, advantage = 0) {
+// 'auto' derives the mode from the position: clearly ahead → safe, clearly
+// behind → aggressive, otherwise balanced. An explicit mode wins. The
+// positional read (winProb, from the game-level eval) is sharper than raw
+// HP — an even-HP board where their active dominates ours is still a losing
+// position — so it is consulted first, with the HP advantage as the fallback
+// so the mode resolves even with minimal information.
+export function resolveRiskMode(opts = {}, advantage = 0, winProb = null) {
   const requested = opts.riskMode ?? 'auto';
   if (requested === 'safe' || requested === 'normal' || requested === 'aggressive') return requested;
+  if (winProb != null) {
+    if (winProb >= WIN_SAFE_AT) return 'safe';
+    if (winProb <= WIN_AGGRESSIVE_AT) return 'aggressive';
+  }
   if (advantage >= AHEAD_THRESHOLD) return 'safe';
   if (advantage <= BEHIND_THRESHOLD) return 'aggressive';
   return 'normal';
@@ -1167,6 +1373,188 @@ export function endgameLocks(ourTeam, theirTeam, gen, field, calcOpts = {}, stat
   return out;
 }
 
+// Their FULL damage on us for the endgame search: revealed best + hidden
+// worst at full strength (like the race projection). A "forced win" claim
+// must survive the strongest move they COULD have — an unrevealed nuke
+// (Gliscor's Brick Break, Dragonite's Focus Punch on a wall) breaks the mate.
+function theirBestHit(theirs, ours, gen, field, calcOpts) {
+  const hidden = worstThreat(theirs, ours, gen, field, calcOpts);
+  return Math.max(ownBestDamage(theirs, ours, gen, field, calcOpts), hidden && hidden.pct >= 50 ? hidden.pct : 0);
+}
+
+// A 1v1 race verdict for the endgame search, mirroring endgameLocks' race
+// logic but with HP overrides (so we can price a mon that just took an entry
+// hit or a target already chipped this turn). Returns the verdict plus the
+// numbers that justify it.
+function duelRace(ours, theirs, gen, field, calcOpts, state, ourSideId, ourHp = null, theirHp = null) {
+  const ourDmg = ownBestDamage(ours, theirs, gen, field, calcOpts);
+  const theirDmg = theirBestHit(theirs, ours, gen, field, calcOpts);
+  const ourH = ourHp ?? ours.hpPercent ?? 100;
+  const theirH = theirHp ?? theirs.hpPercent ?? 100;
+  const order = state ? speedOrder(ours, theirs, gen, state, ourSideId) : null;
+  const weFirst = order?.weMoveFirst === true;
+  const theirPrioKo = (() => {
+    const p = bestPriorityMove(theirs, ours, gen, field, calcOpts);
+    return p && p.max >= ourH ? p.move : null;
+  })();
+  const ourPrioKo = (() => {
+    const p = bestPriorityMove(ours, theirs, gen, field, calcOpts);
+    return p && p.max >= theirH ? p.move : null;
+  })();
+  const ourTurns = ourDmg > 0 ? Math.ceil(theirH / ourDmg) : Infinity;
+  const theirTurns = theirDmg > 0 ? Math.ceil(ourH / theirDmg) : Infinity;
+  let verdict;
+  if (theirPrioKo) verdict = 'lose';
+  else if (ourPrioKo) verdict = 'win';
+  else if (ourDmg <= 0 && theirDmg > 0) verdict = 'lose';
+  else if (theirDmg <= 0 && ourDmg > 0) verdict = 'win';
+  else if (ourTurns === Infinity && theirTurns === Infinity) verdict = 'stall';
+  else if (ourTurns < theirTurns) verdict = 'win';
+  else if (theirTurns < ourTurns) verdict = 'lose';
+  else verdict = weFirst ? 'win' : 'close';
+  return { verdict, ourTurns, theirTurns, theirDmg, weFirst, theirPrioKo, ourPrioKo };
+}
+
+// Endgame checkmate search: when the battle is down to a few mons, find a
+// FORCING win line (a sequence we can execute regardless of their reply)
+// instead of leaving it to the per-move evaluation — the difference between
+// "this move is okay" and "the game is won from here". Runs only in the
+// endgame (≤2 of their mons, ≤4 total) so mid-game cost is zero. Lines:
+//   ko-now   — our active KOs their current this turn (and they can't kill
+//              us before our move lands): game over.
+//   duel     — some mon of ours wins the 1v1 race vs their current (priced
+//              with the entry hit for a bench piece): keep attacking or
+//              switch to it, the win is forced.
+//   ko-then  — our active KOs their current, and when the replacement comes
+//              in, a mon of ours beats it 1v1: KO now, win after.
+//   sac      — our active can't finish, but chips their current into a bench
+//              mate's range; the mate wins even after the entry hit: sac and
+//              clean up.
+// The mirror threat (their line against us) is surfaced when their current
+// KOs our active and their last mon beats every one of ours 1v1.
+export function endgameCheckmate(ourTeam, theirTeam, ourActive, gen, field, calcOpts = {}, state = null, ourSideId = 'p1') {
+  const ours = (ourTeam ?? []).filter((m) => !m.fainted);
+  const theirs = (theirTeam ?? []).filter((m) => !m.fainted);
+  if (!ours.length || !theirs.length) return null;
+  if (theirs.length > 2 || ours.length + theirs.length > 4) return null;
+
+  const theirSideId = ourSideId === 'p1' ? 'p2' : 'p1';
+  const theirActive = activeMon(state?.sides?.[theirSideId]);
+  const current = theirActive ?? mostLikelySwitchIn(theirs);
+  if (!current) return null;
+  const predicted = !theirActive;
+  const theirBench = theirs.filter((m) => m.ident !== current.ident);
+  const ourActive_ = ourActive ?? null;
+  const oursBench = ours.filter((m) => m.ident !== ourActive_?.ident);
+  const out = { mate: null, threat: null };
+
+  const currentHp = current.hpPercent ?? 100;
+  const ourHp = ourActive_?.hpPercent ?? 100;
+  const activeDmg = ourActive_ ? ownBestDamage(ourActive_, current, gen, field, calcOpts) : 0;
+  const activeKOs = activeDmg >= currentHp;
+  const inNote = predicted ? ` (when ${current.species} comes in)` : '';
+
+  if (theirs.length === 1) {
+    // Their last mon. Mate: our active finishes it now, or any mon of ours
+    // wins the 1v1 race (a bench piece priced with the hit it takes on entry).
+    if (ourActive_ && activeKOs) {
+      const race = duelRace(ourActive_, current, gen, field, calcOpts, state, ourSideId);
+      const theyKillFirst = race.theirPrioKo || (race.weFirst === false && race.theirDmg >= ourHp);
+      if (!theyKillFirst) {
+        out.mate = {
+          kind: 'ko-now',
+          piece: ourActive_.species,
+          target: current.species,
+          note: `Checkmate: your ${ourActive_.species} KOs their ${current.species} this turn${inNote} — game over.`,
+        };
+      }
+    } else {
+      for (const m of ours) {
+        const entry = m.ident === ourActive_?.ident ? null : theirBestHit(current, m, gen, field, calcOpts);
+        const race = duelRace(
+          m, current, gen, field, calcOpts, state, ourSideId,
+          entry != null ? Math.max(1, (m.hpPercent ?? 100) - entry) : null
+        );
+        if (race.verdict === 'win') {
+          const via = m.ident === ourActive_?.ident ? 'keep attacking' : `switch to ${m.species}`;
+          out.mate = {
+            kind: 'duel',
+            piece: m.species,
+            target: current.species,
+            note: `Checkmate: your ${m.species} beats their ${current.species} 1v1 (${race.ourTurns}HKO vs their ${race.theirTurns}HKO)${inNote} — ${via}, it's forced.`,
+          };
+          break;
+        }
+      }
+    }
+  } else if (theirs.length === 2 && ourActive_) {
+    // KO-now line: our active finishes their current; their one replacement
+    // comes in and some mon of ours beats it 1v1 → forced.
+    if (activeKOs) {
+      const rep = theirBench[0];
+      const piece = [ourActive_, ...oursBench].find(
+        (m) => duelRace(m, rep, gen, field, calcOpts, state, ourSideId)?.verdict === 'win'
+      );
+      if (piece) {
+        const race = duelRace(piece, rep, gen, field, calcOpts, state, ourSideId);
+        out.mate = {
+          kind: 'ko-then',
+          piece: piece.species,
+          target: current.species,
+          replacement: rep.species,
+          note: `Checkmate: KO their ${current.species} now — when ${rep.species} comes in, your ${piece.species} beats it 1v1 (${race.ourTurns}HKO vs their ${race.theirTurns}HKO).`,
+        };
+      }
+    } else {
+      // Sac line: a bench mate wins the 1v1 even after the entry hit AND our
+      // active's chip this turn brings their current into range.
+      const piece = oursBench.find((m) => {
+        const entry = theirBestHit(current, m, gen, field, calcOpts);
+        const race = duelRace(
+          m, current, gen, field, calcOpts, state, ourSideId,
+          Math.max(1, (m.hpPercent ?? 100) - entry),
+          Math.max(1, currentHp - activeDmg)
+        );
+        return race.verdict === 'win';
+      });
+      if (piece && activeDmg > 0) {
+        const entry = theirBestHit(current, piece, gen, field, calcOpts);
+        const race = duelRace(
+          piece, current, gen, field, calcOpts, state, ourSideId,
+          Math.max(1, (piece.hpPercent ?? 100) - entry),
+          Math.max(1, currentHp - activeDmg)
+        );
+        out.mate = {
+          kind: 'sac',
+          piece: piece.species,
+          target: current.species,
+          note: `Checkmate: sac your ${ourActive_.species} to chip their ${current.species}, then ${piece.species} cleans up (${race.ourTurns}HKO vs their ${race.theirTurns}HKO) — forced win.`,
+        };
+      }
+    }
+  }
+
+  // Their forcing line against us: their current reliably KOs our active this
+  // turn, and their remaining mon beats every one of ours 1v1 — we're mated
+  // unless we take a gamble.
+  if (!out.mate && ourActive_ && theirBench.length && theirs.length === 2) {
+    const theirDmg = theirBestHit(current, ourActive_, gen, field, calcOpts);
+    if (theirDmg >= ourHp) {
+      const sweeper = theirBench[0];
+      const allLose = ours.every((m) => duelRace(m, sweeper, gen, field, calcOpts, state, ourSideId)?.verdict !== 'win');
+      if (allLose) {
+        out.threat = {
+          piece: current.species,
+          sweeper: sweeper.species,
+          note: `⚠ their ${current.species} KOs your ${ourActive_.species}, then ${sweeper.species} beats ${ours.map((m) => m.species).join(', ')} 1v1 — you're on a clock; take the gamble or deny the KO.`,
+        };
+      }
+    }
+  }
+
+  return out.mate || out.threat ? out : null;
+}
+
 // ---------------------------------------------------------------------------
 // Main entry
 // ---------------------------------------------------------------------------
@@ -1179,6 +1567,13 @@ export function recommend(state, opts = {}) {
   const gen = state?.gen ?? 9;
   const profile = opts.profile ?? null;
   const calcOpts = opts.statAssumption ? { statAssumption: opts.statAssumption } : {};
+  // Real-set EV/nature priors (sets.js) are ON by default; tests that pin
+  // behavior under the controlled 252-EV model opt out with { sets: false }.
+  if (opts.sets != null) calcOpts.sets = opts.sets;
+  // Engine committee weights: injectable so the tuning script can compare
+  // candidates against real battles (scripts/tune-weights.js). Defaults to
+  // the tuned set — a passed-in object replaces it wholesale.
+  const engineWeights = opts.engineWeights ?? ENGINE_WEIGHTS;
   const reasoning = [];
 
   if (state?.winner) {
@@ -1191,12 +1586,44 @@ export function recommend(state, opts = {}) {
   const ourTeam = alivePokemon(ourSide);
   const theirTeam = alivePokemon(theirSide);
 
-  // Risk mode: who's ahead and how we should play it. The advantage is a
-  // board read (total remaining HP + a per-body bonus), and the mode adapts
-  // the scoring so we protect a lead or gamble for a comeback.
   const advantage = boardAdvantage(ourTeam, theirTeam);
-  const riskMode = resolveRiskMode(opts, advantage);
-  const risk = RISK_MODES[riskMode];
+  let ourActive = activeMon(ourSide);
+  const theirActive = activeMon(theirSide);
+
+  // Positional read: a game-level "who wins this game" eval (material,
+  // firepower, speed tiers, hazards, recovery, the active 1v1). It resolves
+  // the risk mode below and tempers the switch bar when the position is
+  // extreme — the board, not just the current matchup, decides how we play.
+  const positional = positionalWinProb(ourTeam, theirTeam, gen, field, calcOpts, {
+    hazards,
+    active: { ours: ourActive, theirs: theirActive },
+  });
+
+  // Risk mode: who's ahead and how we should play it. The advantage is a
+  // board read (total remaining HP + a per-body bonus); auto resolves the
+  // mode from the positional win-probability (sharper than raw HP — an
+  // even-HP board where their active dominates ours reads behind), falling
+  // back to the HP read when the eval is inconclusive.
+  const riskMode = resolveRiskMode(opts, advantage, positional.winProb);
+  let risk = RISK_MODES[riskMode];
+  // Auto mode only: extreme positions temper the switch bar continuously on
+  // top of the 3-mode ladder. Deep in a winning position, switching to dodge
+  // a hit is cheap when the game is basically won — lower the bar to preserve
+  // the lead. Deep behind, a switch bleeds tempo we don't have — raise the
+  // bar so we only leave when it's clearly right. (Explicit modes keep their
+  // exact thresholds, so pinned behavior is untouched.)
+  if ((opts.riskMode ?? 'auto') === 'auto') {
+    const p = positional.winProb;
+    const mult = p >= WIN_SAFE_AT ? 0.75 : p <= WIN_AGGRESSIVE_AT ? 1.5 : 1;
+    if (mult !== 1) {
+      risk = {
+        ...risk,
+        switchThreshold: risk.switchThreshold * mult,
+        pivotGate: risk.pivotGate * mult,
+        threatenedAt: risk.threatenedAt * mult,
+      };
+    }
+  }
 
   if (!ourTeam.length) {
     const revealed = ourSide?.pokemon?.length ?? 0;
@@ -1207,9 +1634,6 @@ export function recommend(state, opts = {}) {
         : `All ${fainted} revealed Pokémon are down — this log has not shown your remaining team yet (the live extension will know it).`;
     return { bestMove: null, switchTo: null, reasoning: [msg], note: null };
   }
-
-  let ourActive = activeMon(ourSide);
-  const theirActive = activeMon(theirSide);
 
   // Battle hasn't started yet (team preview / just loaded in): both sides are
   // off the field, so there's no move or switch advice to give — the panel
@@ -1308,7 +1732,7 @@ export function recommend(state, opts = {}) {
       reasoning.push(`${moveName} is out of PP.`);
       continue;
     }
-    const ev = evaluateMove(ourActive, moveName, theirTarget, theirTeam, stayProb, switchProbs, gen, field, calcOpts, speed, hazards, risk);
+    const ev = evaluateMove(ourActive, moveName, theirTarget, theirTeam, stayProb, switchProbs, gen, field, calcOpts, speed, hazards, risk, engineWeights);
     if (ev) moveEvals.push(ev);
   }
   moveEvals.sort((a, b) => b.score - a.score);
@@ -1327,6 +1751,37 @@ export function recommend(state, opts = {}) {
 
   const bestMove = moveEvals[0] ?? null;
   const bestSwitch = switchEvals[0] ?? null;
+
+  // Move confidence: how clearly the committee prefers the top move over the
+  // runner-up. Blends (a) how much engine weight agrees it wins (the engines
+  // vote independently, so agreement is a real signal, not a score artifact)
+  // with (b) how large the blended-score lead is. A move every engine ranks
+  // first with a big lead reads ~95%; two genuinely close moves read ~55%; a
+  // lone option is 100%. Computed here (not at the end) so a middling read
+  // can surface a close-call note inside the reasoning budget.
+  let moveConfidence = 100;
+  const runnerUp = moveEvals[1] ?? null;
+  if (bestMove && runnerUp && runnerUp.score > 0) {
+    const margin = bestMove.score - runnerUp.score;
+    const agreement = engineAgreement(bestMove, runnerUp, engineWeights.agree);
+    const marginNorm = clamp01(margin / 25);
+    moveConfidence = Math.round(clamp01(0.5 + 0.5 * (0.6 * agreement + 0.4 * marginNorm)) * 100);
+    if (moveConfidence < 68 && margin < 8) {
+      reasoning.push(`Close call between ${bestMove.move} (${bestMove.score}) and ${runnerUp.move} (${runnerUp.score}) — either is defensible.`);
+    }
+  }
+  // Surface the committee votes in the reasoning itself (not just the badge
+  // tooltip): the move's score is the blend of the engines, and this line
+  // shows where it came from. Pushed here with the confidence computation so
+  // it survives the 9-line reasoning budget. The breakdown mirrors the
+  // tooltip, but visible at a glance in the list.
+  if (bestMove?.votes) {
+    const v = bestMove.votes;
+    const fmt = (n) => (n > 0 ? `+${n}` : `${n}`);
+    reasoning.push(
+      `Committee on ${bestMove.move}: calc ${v.calc} · KO ${fmt(v.ko)} · speed ${fmt(v.speed)} · context ${fmt(v.context)} · response ${fmt(v.response)} → score ${bestMove.score}`
+    );
+  }
 
   let switchTo = null;
   const moveIsWeak = !bestMove || bestMove.score < 30;
@@ -1363,6 +1818,16 @@ export function recommend(state, opts = {}) {
     };
   }
 
+  // Endgame checkmate search: with few mons left, is the win FORCED? Finds a
+  // forcing line (KO now, a 1v1 piece to switch to, a sac-then-clean, or a
+  // KO-then-beat-the-replacement) instead of leaving it to per-move
+  // evaluation — and warns when their line against us is the forcing one.
+  const checkmate = endgameCheckmate(ourTeam, theirTeam, ourActive, gen, field, calcOpts, state, ourSideId);
+  if (checkmate?.mate) {
+    reasoning.push(checkmate.mate.note);
+  } else if (checkmate?.threat) {
+    reasoning.push(checkmate.threat.note);
+  }
   // Endgame lock-in: with few mons left, call out the pairings that are
   // decided — the wins to take and the losses to avoid.
   const locks = endgameLocks(ourTeam, theirTeam, gen, field, calcOpts, state, ourSideId);
@@ -1486,14 +1951,16 @@ export function recommend(state, opts = {}) {
     }
   }
 
-  // Risk-mode callout: who's ahead, and how that shapes the recommendation.
-  // Only worth a line when it actually changes how we play (not balanced).
+  // Risk-mode callout: who's ahead (the positional read plus the raw HP
+  // margin), and how that shapes the recommendation. Only worth a line when
+  // it actually changes how we play (not balanced).
   if (riskMode !== 'normal') {
     const advTxt = advantage >= 0 ? `+${Math.round(advantage)}` : String(Math.round(advantage));
+    const wpTxt = `, ~${Math.round(positional.winProb * 100)}% to win`;
     reasoning.push(
       riskMode === 'safe'
-        ? `You're ahead (~${advTxt}% HP) — ${risk.label}: take the sure line, protect the lead.`
-        : `You're behind (~${advTxt}% HP) — ${risk.label}: take the gamble that wins if it lands.`
+        ? `You're ahead (~${advTxt}% HP${wpTxt}) — ${risk.label}: take the sure line, protect the lead.`
+        : `You're behind (~${advTxt}% HP${wpTxt}) — ${risk.label}: take the gamble that wins if it lands.`
     );
   }
 
@@ -1602,31 +2069,42 @@ export function recommend(state, opts = {}) {
     reasoning.push(`Your ${ourActive.species} has ${ourActive.moves.length} moves known from this log.`);
   }
 
-  // Confidence: how strongly this option is preferred over its alternative.
-  // The best move's confidence is its share vs the runner-up move (100% when
-  // it's the only option); the switch's confidence is its share vs using the
-  // best move (100% when there is no move to compare against).
-  let moveConfidence = 100;
-  const runnerUp = moveEvals[1] ?? null;
-  if (bestMove && runnerUp && runnerUp.score > 0) {
-    moveConfidence = Math.round(clamp01(bestMove.score / (bestMove.score + runnerUp.score)) * 100);
-  }
+  // Switch confidence: how far the switch's net clears the mode's own switch
+  // bar (that's the engine's decision rule — the same threshold that decided
+  // to recommend it at all). A switch that just clears the bar is a judgment
+  // call (~55%); one that crushes it is a clear call (~95%). A forced switch
+  // (no move to compare against) is 100%.
   let switchConfidence = null;
   if (switchTo) {
-    // The alternative is "use the best move". A move that scores negative is
-    // worse than useless, so it can't inflate the switch's share past 100%.
-    const alt = Math.max(0, bestMove?.score ?? 0);
-    const total = switchTo.score + alt;
-    switchConfidence = total > 0 ? Math.round(clamp01(switchTo.score / total) * 100) : 100;
+    if (!bestMove) {
+      switchConfidence = 100;
+    } else {
+      const bar = risk.switchThreshold;
+      const excess = switchTo.score - bar;
+      switchConfidence = Math.round(clamp01(0.55 + 0.4 * clamp01(excess / 25)) * 100);
+    }
   }
 
   return {
     bestMove: bestMove
-      ? { move: bestMove.move, score: bestMove.score, note: bestMove.note, expected: bestMove.expected, confidence: moveConfidence }
+      ? { move: bestMove.move, score: bestMove.score, note: bestMove.note, expected: bestMove.expected, confidence: moveConfidence, votes: bestMove.votes }
       : null,
+    // Full ranking (top-3 by score) — the tuning harness uses it to measure
+    // how often the actual move lands in the engine's top options, not just
+    // the exact pick (players often take the second-best play).
+    rankedMoves: opts.rankedMoves ? moveEvals.slice(0, 3).map((m) => ({ move: m.move, score: m.score })) : undefined,
     switchTo: switchTo ? { ...switchTo, confidence: switchConfidence } : null,
     reasoning: reasoning.slice(0, 9),
     note: null,
-    risk: { mode: riskMode, label: risk.label, advantage: Math.round(advantage) },
+    risk: {
+      mode: riskMode,
+      label: risk.label,
+      advantage: Math.round(advantage),
+      // The game-level read, 0-100: how likely we are to win this game.
+      winProb: Math.round(positional.winProb * 100),
+      // The effective switch bar after the auto-mode temper (what the engine
+      // actually compares the switch's net against).
+      switchBar: risk.switchThreshold,
+    },
   };
 }

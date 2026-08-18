@@ -119,8 +119,11 @@ test('buildPokemon: unrevealed mons default to the template level in randoms, 10
 
 test('damagePercent: randoms levels change the numbers (L79 vs L100 Weavile)', () => {
   setBattleFormat(null);
-  const d100 = damagePercent(9, { species: 'Weavile', moves: ['Icicle Crash'] }, { species: 'Garchomp' }, 'Icicle Crash', null);
+  // Real-set spreads are a gen-9 pre-made feature (and Garchomp's random
+  // template level is 74, not 100) — isolate the LEVEL effect by comparing
+  // both sides under the same controlled EV model.
+  const d100 = damagePercent(9, { species: 'Weavile', moves: ['Icicle Crash'] }, { species: 'Garchomp' }, 'Icicle Crash', null, { sets: false });
   setBattleFormat('[Gen 9] Random Battle');
   const dRandom = damagePercent(9, { species: 'Weavile', moves: ['Icicle Crash'] }, { species: 'Garchomp' }, 'Icicle Crash', null);
-  assert.ok(dRandom.mean > d100.mean, `randoms levels should change damage (${dRandom.mean} vs ${d100.mean})`);
+  assert.notEqual(dRandom.mean, d100.mean, `randoms levels should change damage (${dRandom.mean} vs ${d100.mean})`);
 });

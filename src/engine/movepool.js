@@ -16,8 +16,16 @@
 import { MOVES, SPECIES } from '@smogon/calc';
 import learnsets from './data/learnsets-lite.js';
 import usage from './data/usage-lite.js';
-import { damagePercent, effectivenessOf, fieldSig } from './calc.js';
+import { damagePercent, effectivenessOf, fieldSig, round1 } from './calc.js';
 import { isRandomBattle, randomsMoves } from './randoms.js';
+
+// Recovery moves — a side's ability to heal off chip and stall. Shared by the
+// move scorer (recommend.js) and the positional eval (position.js), so the
+// two engines agree on what "can recover" means.
+export const RECOVERY_MOVES = new Set([
+  'Recover', 'Roost', 'Soft-Boiled', 'Slack Off', 'Synthesis', 'Moonlight',
+  'Morning Sun', 'Shore Up', 'Strength Sap', 'Rest', 'Heal Order',
+]);
 
 const toID = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 
@@ -85,10 +93,17 @@ function stateSig(mon) {
 const threatCache = new Map();
 const MAX_CACHE = 400;
 
-// Worst hidden-move damage % their active could deal to `target`, or null.
-// `theirMon.moves` (revealed moves) are excluded — we only care about what
-// they have NOT shown yet.
-export function worstThreat(theirMon, target, gen, field, calcOpts = {}) {
+// Hidden-move damage reads for `theirMon` vs `target` — computed in ONE pass
+// so the worst-case (risk floor) and the usage-weighted expected value share
+// the same candidate scoring and the same damage calls:
+//   worst     — the single strongest hidden move (the "if they have it" read,
+//               used for warnings and the defense-first gates).
+//   expected  — the usage-weighted mean of the likely hidden moves (the honest
+//               EV read: a 90%-usage move weighs 90× a 1% theorymon slot, so
+//               a rare-but-lethal coverage move stops over-penalizing switches
+//               into mons whose real sets are known).
+// Returns null when there's nothing hidden to reason about.
+function hiddenThreatRead(theirMon, target, gen, field, calcOpts = {}) {
   if (!theirMon || !target) return null;
   // A Pokémon can only know 4 moves — if all 4 are revealed, there is no
   // hidden threat left to warn about.
@@ -132,22 +147,66 @@ export function worstThreat(theirMon, target, gen, field, calcOpts = {}) {
     const usage = usageWeight(theirMon.species, name) ?? 0;
     // Usage is a strong prior: a move run on 80% of sets is far more likely
     // than one on 2%, even if both would deal similar damage. Blend it in.
-    scored.push({ name, score: (bp || 100) * eff * stab * (0.4 + 0.6 * Math.min(1, usage / 50)) });
+    scored.push({ name, usage, score: (bp || 100) * eff * stab * (0.4 + 0.6 * Math.min(1, usage / 50)) });
   }
   scored.sort((a, b) => b.score - a.score);
 
+  // Run the real damage calc on the top few candidates; keep every scored hit
+  // (with its damage) so the EV can weight by usage, and track the worst.
+  const top = scored.slice(0, 4);
+  const hits = [];
   let best = null;
-  for (const cand of scored.slice(0, 4)) {
+  for (const cand of top) {
     const d = damagePercent(gen, theirMon, target, cand.name, field, calcOpts);
     if (!d) continue;
+    hits.push({ name: cand.name, usage: cand.usage, pct: d.mean, max: d.max, eff: d.effectiveness, type: d.type });
     if (!best || d.mean > best.pct) {
       best = { move: cand.name, pct: d.mean, max: d.max, eff: d.effectiveness, type: d.type };
     }
   }
+  if (!best) {
+    threatCache.set(cacheKey, null);
+    return null;
+  }
 
+  // Expected value: usage-weighted mean of the likely hidden hits. Moves with
+  // no usage data (off-meta theorymon) get a small floor weight so they nudge
+  // the read without dominating it; when the species has NO usage table at
+  // all, every hit weighs equally (a plain average of the top candidates).
+  let weightSum = 0;
+  let dmgSum = 0;
+  for (const h of hits) {
+    const w = h.usage > 0 ? h.usage : 1;
+    weightSum += w;
+    dmgSum += w * h.pct;
+  }
+  const expected = {
+    move: hits.reduce((a, b) => (b.usage > a.usage ? b : a)).name,
+    pct: weightSum ? round1(dmgSum / weightSum) : best.pct,
+    max: Math.max(...hits.map((h) => h.max)),
+    eff: best.eff,
+    type: best.type,
+  };
+
+  const out = { worst: best, expected };
   if (threatCache.size >= MAX_CACHE) threatCache.clear();
-  threatCache.set(cacheKey, best);
-  return best;
+  threatCache.set(cacheKey, out);
+  return out;
+}
+
+// Worst hidden-move damage % their active could deal to `target`, or null.
+// The risk floor: warnings and the defense-first gates price what they COULD
+// have, so a speculative-but-lethal move still shows up.
+export function worstThreat(theirMon, target, gen, field, calcOpts = {}) {
+  return hiddenThreatRead(theirMon, target, gen, field, calcOpts)?.worst ?? null;
+}
+
+// Usage-weighted expected hidden-move damage % vs `target`, or null. The
+// honest EV read for scoring: an unlikely coverage nuke stops outweighing the
+// moves they actually run, so mons whose real sets are known stop being
+// over-penalized for theorymon. (Worst-case stays the risk floor above.)
+export function expectedThreat(theirMon, target, gen, field, calcOpts = {}) {
+  return hiddenThreatRead(theirMon, target, gen, field, calcOpts)?.expected ?? null;
 }
 
 // A short, human-readable sample of what a species could be running — the top

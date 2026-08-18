@@ -13,6 +13,7 @@ export {
   evaluateMove,
   evaluateSwitch,
   incomingPercent,
+  expectedIncoming,
   ownBestDamage,
   bestDamageMove,
   matchupDamage,
@@ -34,18 +35,23 @@ export {
   teamWincon,
   sweepPotential,
   endgameLocks,
+  endgameCheckmate,
   boardAdvantage,
   resolveRiskMode,
   RISK_MODES,
   fieldDamageDelta,
+  engineAgreement,
 } from './recommend.js';
 export {
   potentialMoves,
   topPotentialMoves,
   usageWeight,
   worstThreat,
+  expectedThreat,
   teamThreats,
+  RECOVERY_MOVES,
 } from './movepool.js';
+export { positionalWinProb } from './position.js';
 export {
   setBattleFormat,
   isRandomBattle,

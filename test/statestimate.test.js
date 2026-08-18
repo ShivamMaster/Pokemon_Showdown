@@ -214,9 +214,10 @@ function makeFoulPlayMatchup() {
 
 test('damagePercent: Foul Play assumes the TARGET is Atk-invested (not the user)', () => {
   const { atk, def } = makeFoulPlayMatchup();
-  // The default calc must price the defender's Atk at the standard 252-EV
-  // investment (it's the attack source), not the user's irrelevant Atk.
-  const dDefault = damagePercent(9, atk, def, 'Foul Play', new Field());
+  // Without real-set data (sets: false), the default calc must price the
+  // defender's Atk at the standard 252-EV investment (it's the attack
+  // source), not the user's irrelevant Atk.
+  const dDefault = damagePercent(9, atk, def, 'Foul Play', new Field(), { sets: false });
   const dZero = damagePercent(9, atk, def, 'Foul Play', new Field(), {
     defenderEvs: { hp: 252, def: 252, atk: 0 },
   });
@@ -225,6 +226,19 @@ test('damagePercent: Foul Play assumes the TARGET is Atk-invested (not the user)
   });
   assert.equal(dDefault.mean, dMax.mean, 'default = defender at 252 Atk EV');
   assert.ok(dDefault.mean > dZero.mean, 'assumed investment deals more than base Atk');
+});
+
+test('damagePercent: Foul Play uses the TARGET\'s real spread Atk (sets)', () => {
+  const { atk, def } = makeFoulPlayMatchup();
+  // With real-set data the default prices the defender's Atk from its top
+  // spread — Garchomp runs 252 Atk, so Foul Play hits as hard as the old
+  // 252-EV assumption, but the defender's real (0 HP / 0 Def) bulk makes it
+  // land harder than the old 252/252 defensive assumption.
+  const dSets = damagePercent(9, atk, def, 'Foul Play', new Field());
+  const d252 = damagePercent(9, atk, def, 'Foul Play', new Field(), {
+    defenderEvs: { hp: 252, def: 252, atk: 252 },
+  });
+  assert.ok(dSets.mean > d252.mean, `real Garchomp bulk is 0 HP / 0 Def (${dSets.mean}% vs ${d252.mean}%)`);
 });
 
 test('damagePercent: Foul Play vs a frail special attacker is the real read', () => {
@@ -308,18 +322,49 @@ test('inferOffensiveStat: no signal from mixed, single, or no moves', () => {
 
 test('damagePercent: inferred physical attacker\'s hidden special moves are priced at ~0 SpA', () => {
   // Garchomp with only physical moves revealed is Atk-invested — its
-  // unrevealed Fire Blast must NOT be priced as a 252-SpA nuke.
+  // unrevealed Fire Blast must NOT be priced as a 252-SpA nuke. (sets: false
+  // isolates the inference rule; with real sets the species data itself
+  // prices Garchomp's Fire Blast at ~0 SpA — covered by the next test.)
   const garchomp = createPokemon({ ident: 'p1a: Garchomp', side: 'p1', species: 'Garchomp', level: 100 });
   addMove(garchomp, 'Earthquake');
   addMove(garchomp, 'Outrage');
   const garchompUnknown = createPokemon({ ident: 'p1b: Garchomp', side: 'p1', species: 'Garchomp', level: 100 });
   const scizor = createPokemon({ ident: 'p2a: Scizor', side: 'p2', species: 'Scizor', level: 100 });
-  const dInferred = damagePercent(9, garchomp, scizor, 'Fire Blast', new Field());
-  const dUnknown = damagePercent(9, garchompUnknown, scizor, 'Fire Blast', new Field());
+  const dInferred = damagePercent(9, garchomp, scizor, 'Fire Blast', new Field(), { sets: false });
+  const dUnknown = damagePercent(9, garchompUnknown, scizor, 'Fire Blast', new Field(), { sets: false });
   assert.ok(
     dInferred.mean < dUnknown.mean,
     `inferred-physical Fire Blast (${dInferred.mean}%) should be weaker than unknown (${dUnknown.mean}%)`
   );
+});
+
+test('damagePercent: real sets price a species\' hidden coverage by its actual spread (sets)', () => {
+  // Garchomp's top spread is 252 Atk / 0 SpA — so its hidden Fire Blast is a
+  // coverage tick even when the attacker is UNKNOWN. The species data
+  // subsumes the inference rule for data-covered mons: both an all-physical
+  // and an unknown Garchomp price Fire Blast at ~0 SpA.
+  const garchomp = createPokemon({ ident: 'p1a: Garchomp', side: 'p1', species: 'Garchomp', level: 100 });
+  addMove(garchomp, 'Earthquake');
+  addMove(garchomp, 'Outrage');
+  const garchompUnknown = createPokemon({ ident: 'p1b: Garchomp', side: 'p1', species: 'Garchomp', level: 100 });
+  // Ferrothorn is 4x weak to Fire but its real spread (252 HP / 0 SpD bulk in
+  // the physical direction) keeps the hit survivable; the old 252-SpA nuke
+  // assumption blows it away. The gap is the point: the species data prices
+  // Garchomp's Fire Blast as a 0-SpA coverage tick, not a special nuke.
+  const ferro = createPokemon({ ident: 'p2a: Ferrothorn', side: 'p2', species: 'Ferrothorn', level: 100 });
+  const dInferred = damagePercent(9, garchomp, ferro, 'Fire Blast', new Field());
+  const dUnknown = damagePercent(9, garchompUnknown, ferro, 'Fire Blast', new Field());
+  assert.ok(
+    dInferred.mean < 60,
+    `real-spread Garchomp Fire Blast is a coverage tick, got ${dInferred.mean}%`
+  );
+  assert.ok(
+    dUnknown.mean < 60,
+    `an unknown Garchomp is still most likely the physical set, got ${dUnknown.mean}%`
+  );
+  // And it differs from the 252-SpA nuke the old assumption produced.
+  const dNuke = damagePercent(9, garchompUnknown, ferro, 'Fire Blast', new Field(), { sets: false });
+  assert.ok(dNuke.mean > dUnknown.mean + 15, `252-SpA assumption (${dNuke.mean}%) exceeds the real-set read (${dUnknown.mean}%)`);
 });
 
 test('damagePercent: Foul Play sharpens against a known special attacker (low Atk)', () => {
@@ -334,8 +379,11 @@ test('damagePercent: Foul Play sharpens against a known special attacker (low At
   addMove(spec, 'Fire Blast');
   addMove(spec, 'Draco Meteor');
   addMove(spec, 'Surf');
-  const dPhys = damagePercent(9, umbreon, phys, 'Foul Play', new Field());
-  const dSpec = damagePercent(9, umbreon, spec, 'Foul Play', new Field());
+  // sets: false isolates the inference rule — with real sets on, Garchomp has
+  // no special set in the data, so both reads price its 252-Atk spread (the
+  // species data already subsumes the rule; that's the test above).
+  const dPhys = damagePercent(9, umbreon, phys, 'Foul Play', new Field(), { sets: false });
+  const dSpec = damagePercent(9, umbreon, spec, 'Foul Play', new Field(), { sets: false });
   assert.ok(
     dPhys.mean > dSpec.mean,
     `Foul Play hits a physical attacker (${dPhys.mean}%) harder than a special one (${dSpec.mean}%)`

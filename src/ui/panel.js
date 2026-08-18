@@ -187,6 +187,9 @@ export function buildPanelModel(state, opts = {}) {
   const theirActiveMon = activeOf(theirSide);
 
   const getPotential = opts.getPotentialMoves ?? null;
+  // Damage-model opts threaded into every calc (e.g. { sets: false } for the
+  // controlled flat-EV model in tests that pin item plays / numbers).
+  const calcOpts = opts.calcOpts ?? {};
 
   // Learned EV investment (back-calculated from observed damage) as a short
   // label like "spa 252" / "def ~120", or null when nothing narrowed yet.
@@ -214,7 +217,7 @@ export function buildPanelModel(state, opts = {}) {
     // every number agrees everywhere. Only alive bench mons are candidates.
     let vsActive = null;
     if (vsActiveMon && !mon.fainted && !mon.active) {
-      const d = matchupDamage(gen, mon, vsActiveMon, field);
+      const d = matchupDamage(gen, mon, vsActiveMon, field, calcOpts);
       vsActive = {
         species: vsActiveMon.species,
         takes: d.theirs ?? null,
@@ -330,8 +333,8 @@ export function buildPanelModel(state, opts = {}) {
       theirs: cardOf(theirActiveMon, false),
       speed: speedLine(ourActiveMon, theirActiveMon, gen, state, ourSideId),
       typeEdge: typeEdgeOf(gen, ourActiveMon, theirActiveMon),
-      damage: matchupDamage(gen, ourActiveMon, theirActiveMon, field),
-      calc: matchupCalc(gen, ourActiveMon, theirActiveMon, field),
+      damage: matchupDamage(gen, ourActiveMon, theirActiveMon, field, calcOpts),
+      calc: matchupCalc(gen, ourActiveMon, theirActiveMon, field, calcOpts),
     };
   }
 
@@ -443,12 +446,12 @@ function miniBar(pct, clickable = false, potential = null, potentialMax = null, 
 // damaging move of each side against the other's active, with the roll range
 // and KO chances vs its current HP. Same damagePercent path as the Damage
 // row, so every number in the breakdown agrees with the row.
-function matchupCalc(gen, ourMon, theirMon, field) {
+function matchupCalc(gen, ourMon, theirMon, field, calcOpts = {}) {
   const side = (atkMon, defMon) => {
     const hp = defMon?.hpPercent ?? 100;
     const out = [];
     for (const moveName of atkMon?.moves ?? []) {
-      const d = damagePercent(gen, atkMon, defMon, moveName, field);
+      const d = damagePercent(gen, atkMon, defMon, moveName, field, calcOpts);
       if (!d || d.category === 'Status') continue;
       out.push({
         move: moveName,
@@ -754,14 +757,26 @@ export function renderPanel(model) {
       : `${model.meta.winner} wins`
     : null;
 
-  const confBadge = (c) => (c != null ? ` <span class="psa-rec-conf" title="How strongly this option is preferred over its alternative">${c}%</span>` : '');
-  // Risk-mode badge: which line we're playing (auto reads the board each turn).
+  // Confidence badge with an engine-breakdown tooltip: the move's score is
+  // the blend of the committee's votes (calc = damage engine, ko, speed,
+  // context = situational), so the tooltip shows where the percentage comes
+  // from instead of leaving it a black box.
+  const confBadge = (c, votes) => {
+    if (c == null) return '';
+    const breakdown = votes
+      ? ` — calc ${votes.calc} · KO ${votes.ko} · speed ${votes.speed} · context ${votes.context}${votes.response != null ? ` · response ${votes.response}` : ''}`
+      : '';
+    return ` <span class="psa-rec-conf" title="How strongly this option is preferred over its alternative${breakdown}">${c}%</span>`;
+  };
+  // Risk-mode badge: which line we're playing (auto reads the board each turn)
+  // plus the game-level win-probability read, so the margin is visible at a
+  // glance instead of only in the reasoning.
   const riskHtml = rec?.risk?.mode && rec.risk.mode !== 'normal'
-    ? `<div class="psa-rec-risk psa-risk-${escapeHtml(rec.risk.mode)}" title="${rec.risk.mode === 'safe' ? 'You\'re ahead — taking the sure line, protecting the lead.' : 'You\'re behind — taking the gamble that wins if it lands.'}">${rec.risk.mode === 'safe' ? '🛡' : '⚔'} ${escapeHtml(rec.risk.label)}${rec.risk.advantage != null ? ` (${rec.risk.advantage >= 0 ? '+' : ''}${rec.risk.advantage})` : ''}</div>`
+    ? `<div class="psa-rec-risk psa-risk-${escapeHtml(rec.risk.mode)}" title="${rec.risk.mode === 'safe' ? 'You\'re ahead — taking the sure line, protecting the lead.' : 'You\'re behind — taking the gamble that wins if it lands.'}">${rec.risk.mode === 'safe' ? '🛡' : '⚔'} ${escapeHtml(rec.risk.label)}${rec.risk.advantage != null ? ` (${rec.risk.advantage >= 0 ? '+' : ''}${rec.risk.advantage})` : ''}${rec.risk.winProb != null ? ` · ~${rec.risk.winProb}% win` : ''}</div>`
     : '';
   const recHtml = `<div class="psa-rec">
   ${riskHtml}
-  <div class="psa-rec-row"><span class="psa-rec-label">Best move</span><span class="psa-rec-value">${escapeHtml(rec?.bestMove?.move ?? '—')}${confBadge(rec?.bestMove?.confidence)}</span></div>
+  <div class="psa-rec-row"><span class="psa-rec-label">Best move</span><span class="psa-rec-value">${escapeHtml(rec?.bestMove?.move ?? '—')}${confBadge(rec?.bestMove?.confidence, rec?.bestMove?.votes)}</span></div>
   <div class="psa-rec-row"><span class="psa-rec-label">Switch to</span><span class="psa-rec-value">${escapeHtml(rec?.switchTo?.species ?? '—')}${confBadge(rec?.switchTo?.confidence)}</span></div>
   ${rec?.note ? `<div class="psa-rec-note">${escapeHtml(rec.note)}</div>` : ''}
   ${winnerText ? `<div class="psa-rec-note psa-winner">${escapeHtml(winnerText)}</div>` : ''}
