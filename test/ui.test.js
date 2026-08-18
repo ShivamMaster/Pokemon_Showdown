@@ -212,12 +212,28 @@ test('render: risk-mode badge shows the line we are playing and the margin', () 
   const agg = mk({ mode: 'aggressive', label: 'playing aggressive', advantage: -210 });
   assert.ok(agg.includes('psa-risk-aggressive'));
   assert.ok(agg.includes('(-210)'));
-  // The game-level win-probability read rides along when the engine provides it.
-  const wp = mk({ mode: 'safe', label: 'playing safe', advantage: 230, winProb: 68 });
-  assert.ok(wp.includes('~68% win'), 'the badge shows the win-probability read');
   // Balanced (or absent) -> no badge at all.
   assert.ok(!mk({ mode: 'normal', label: 'balanced play', advantage: 0 }).includes('psa-rec-risk'));
   assert.ok(!mk(null).includes('psa-rec-risk'));
+});
+
+test('render: win-probability gauge shows the per-turn read in every mode', () => {
+  const mk = (risk) =>
+    renderPanel(buildPanelModel(state, { recommendation: { bestMove: { move: 'Earthquake' }, switchTo: null, reasoning: [], note: null, risk } }));
+  // The gauge renders whenever the engine returns the read — even when the
+  // board is balanced (no risk badge at all in normal mode).
+  const even = mk({ mode: 'normal', label: 'balanced play', advantage: 0, winProb: 52 });
+  assert.ok(even.includes('psa-win-gauge'), 'gauge markup present');
+  assert.ok(even.includes('psa-win-even'), 'balanced read carries its class');
+  assert.ok(even.includes('~52%'), 'the percentage is shown');
+  assert.ok(even.includes('psa-win-fill'), 'the bar fill is present');
+  assert.ok(even.includes('psa-win-marker'), 'the position marker is present');
+  // Safe read -> safe class; aggressive read -> aggressive class.
+  assert.ok(mk({ mode: 'safe', label: 'playing safe', advantage: 230, winProb: 68 }).includes('psa-win-safe'));
+  assert.ok(mk({ mode: 'aggressive', label: 'playing aggressive', advantage: -210, winProb: 30 }).includes('psa-win-agg'));
+  // No read -> no gauge.
+  assert.ok(!mk(null).includes('psa-win-gauge'));
+  assert.ok(!mk({ mode: 'normal', label: 'balanced play', advantage: 0 }).includes('psa-win-gauge'));
 });
 
 // ---------------------------------------------------------------------------

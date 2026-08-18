@@ -237,6 +237,16 @@ test('real log: tera types are recorded', () => {
   assert.equal(rillaboom.terastallized, true);
 });
 
+test('terastallize events are recorded as actions for profile learning', () => {
+  const s = parseLog(realLog);
+  const teras = s.actions.filter((a) => a.type === 'tera');
+  assert.ok(teras.length >= 1, 'the real log has at least one tera');
+  const theirTera = teras.find((a) => a.side === 'p2');
+  assert.ok(theirTera, 'their tera is attributed to their side');
+  assert.equal(theirTera.teraType, 'Flying'); // Roaring Moon's tera
+  assert.equal(theirTera.turn, 15);
+});
+
 test('real log: field conditions and side effects', () => {
   const s = parseLog(realLog);
   // Grassy Terrain is up at the end (Rillaboom's Grassy Surge).

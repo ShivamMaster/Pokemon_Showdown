@@ -768,13 +768,25 @@ export function renderPanel(model) {
       : '';
     return ` <span class="psa-rec-conf" title="How strongly this option is preferred over its alternative${breakdown}">${c}%</span>`;
   };
+  // Win-probability gauge: the game-level read as a per-turn bar so the
+  // margin is visible at a glance even when the board is balanced (the risk
+  // badge only appears in safe/aggressive). Rendered whenever the engine
+  // returns the read (which is every turn — the positional eval always runs).
+  const wp = rec?.risk?.winProb;
+  const winGauge = wp != null
+    ? `<div class="psa-win-gauge psa-win-${wp >= 66 ? 'safe' : wp <= 34 ? 'agg' : 'even'}" title="Game-level win probability: material, firepower, speed control, hazards, recovery, and the active 1v1 trade.">
+  <span class="psa-win-label">Win</span>
+  <span class="psa-win-track"><span class="psa-win-fill" style="width:${Math.max(2, Math.min(98, wp))}%"></span><span class="psa-win-marker" style="left:${Math.max(2, Math.min(98, wp))}%"></span></span>
+  <span class="psa-win-value">~${wp}%</span>
+</div>`
+    : '';
   // Risk-mode badge: which line we're playing (auto reads the board each turn)
-  // plus the game-level win-probability read, so the margin is visible at a
-  // glance instead of only in the reasoning.
+  // plus the board-advantage margin, so the playstyle is visible at a glance.
   const riskHtml = rec?.risk?.mode && rec.risk.mode !== 'normal'
-    ? `<div class="psa-rec-risk psa-risk-${escapeHtml(rec.risk.mode)}" title="${rec.risk.mode === 'safe' ? 'You\'re ahead — taking the sure line, protecting the lead.' : 'You\'re behind — taking the gamble that wins if it lands.'}">${rec.risk.mode === 'safe' ? '🛡' : '⚔'} ${escapeHtml(rec.risk.label)}${rec.risk.advantage != null ? ` (${rec.risk.advantage >= 0 ? '+' : ''}${rec.risk.advantage})` : ''}${rec.risk.winProb != null ? ` · ~${rec.risk.winProb}% win` : ''}</div>`
+    ? `<div class="psa-rec-risk psa-risk-${escapeHtml(rec.risk.mode)}" title="${rec.risk.mode === 'safe' ? 'You\'re ahead — taking the sure line, protecting the lead.' : 'You\'re behind — taking the gamble that wins if it lands.'}">${rec.risk.mode === 'safe' ? '🛡' : '⚔'} ${escapeHtml(rec.risk.label)}${rec.risk.advantage != null ? ` (${rec.risk.advantage >= 0 ? '+' : ''}${rec.risk.advantage})` : ''}</div>`
     : '';
   const recHtml = `<div class="psa-rec">
+  ${winGauge}
   ${riskHtml}
   <div class="psa-rec-row"><span class="psa-rec-label">Best move</span><span class="psa-rec-value">${escapeHtml(rec?.bestMove?.move ?? '—')}${confBadge(rec?.bestMove?.confidence, rec?.bestMove?.votes)}</span></div>
   <div class="psa-rec-row"><span class="psa-rec-label">Switch to</span><span class="psa-rec-value">${escapeHtml(rec?.switchTo?.species ?? '—')}${confBadge(rec?.switchTo?.confidence)}</span></div>

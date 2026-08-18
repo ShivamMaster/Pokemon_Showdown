@@ -152,6 +152,18 @@ export function summarizeBattle(state, ourSideId) {
     sets[mon.species] = { moves: [...(mon.moves ?? [])], item: mon.item ?? null, ability: mon.ability ?? null };
   }
 
+  // Tera habits: WHEN they tera (turn number) and on WHICH species. Tera is a
+  // per-battle decision (which mon, when), so it carries over between battles
+  // even in Random Battles — unlike species patterns.
+  let theirTeraTurn = null;
+  let theirTeraSpecies = null;
+  for (const a of actions) {
+    if (a.side !== theirSideId || a.type !== 'tera') continue;
+    const sp = speciesOf(state, a.ident);
+    if (sp && theirTeraSpecies == null) theirTeraSpecies = sp;
+    if (theirTeraTurn == null || (a.turn != null && a.turn < theirTeraTurn)) theirTeraTurn = a.turn;
+  }
+
   const winner = state.winner;
   const result =
     !winner ? 'incomplete' : winner === 'tie' ? 'tie' : theirSide.playerName === winner ? 'loss' : 'win';
@@ -173,6 +185,8 @@ export function summarizeBattle(state, ourSideId) {
     switchIns: voluntarySwitchIns,
     movesUsed: Object.fromEntries(Object.entries(movesUsed).map(([sp, set]) => [sp, [...set]])),
     sets,
+    teraTurn: theirTeraTurn,
+    teraSpecies: theirTeraSpecies,
     log: battleLog(state, ourSideId),
   };
 }
@@ -191,6 +205,9 @@ export function emptyProfile(username) {
     sets: {},
     lowHpSwitches: 0,
     lowHpFaints: 0,
+    teraCount: 0,
+    teraSpecies: {},
+    teraEarliestTurn: null,
   };
 }
 
@@ -224,6 +241,18 @@ export function updateProfile(profile, summary) {
 
   base.lowHpSwitches += summary.lowHpSwitches ?? 0;
   base.lowHpFaints += summary.lowHpFaints ?? 0;
+
+  // Tera habits: how often they tera, on what, and how early.
+  if (summary.teraTurn != null) {
+    base.teraCount = (base.teraCount ?? 0) + 1;
+    base.teraSpecies = base.teraSpecies ?? {};
+    if (summary.teraSpecies) {
+      base.teraSpecies[summary.teraSpecies] = (base.teraSpecies[summary.teraSpecies] ?? 0) + 1;
+    }
+    if (base.teraEarliestTurn == null || summary.teraTurn < base.teraEarliestTurn) {
+      base.teraEarliestTurn = summary.teraTurn;
+    }
+  }
   return base;
 }
 
@@ -241,7 +270,9 @@ export function normalizeProfile(profile) {
 
 const topEntries = (obj, n) => Object.entries(obj ?? {}).sort((a, b) => b[1] - a[1]).slice(0, n);
 
-// The shape the engine consumes: switchTendency.atLowHp and commonSwitchIns.
+// The shape the engine consumes: switchTendency.atLowHp, commonSwitchIns,
+// moveUsage (per-species personal move priors for hidden-move pricing), and
+// teraHabits (when/on what they tera).
 export function profileForEngine(profile) {
   if (!profile) return null;
   const situations = (profile.lowHpSwitches ?? 0) + (profile.lowHpFaints ?? 0);
@@ -253,6 +284,30 @@ export function profileForEngine(profile) {
   }
   if (Object.keys(profile.switchIns ?? {}).length) {
     engineProfile.commonSwitchIns = { ...profile.switchIns };
+  }
+  // Lead tendencies: who they open with. The engine falls back to this when
+  // there's no switch-in history for the current team (mostLikelySwitchIn).
+  if (Object.keys(profile.commonLeads ?? {}).length) {
+    engineProfile.commonLeads = { ...profile.commonLeads };
+  }
+  // Per-opponent move priors: species → move → count of times they've been
+  // seen running it. Only exposed when there's real history (a single battle's
+  // one move isn't a habit).
+  const moveUsage = profile.moveUsage ?? {};
+  const seenSpecies = Object.keys(moveUsage).filter((sp) => Object.keys(moveUsage[sp] ?? {}).length >= 2);
+  if (seenSpecies.length) {
+    const usage = {};
+    for (const sp of seenSpecies) usage[sp] = { ...moveUsage[sp] };
+    engineProfile.moveUsage = usage;
+  }
+  // Tera habits: how often they tera, on what species, and how early.
+  const teraCount = profile.teraCount ?? 0;
+  if (teraCount > 0) {
+    engineProfile.teraHabits = {
+      count: teraCount,
+      species: { ...(profile.teraSpecies ?? {}) },
+      earliestTurn: profile.teraEarliestTurn ?? null,
+    };
   }
   return Object.keys(engineProfile).length ? engineProfile : null;
 }

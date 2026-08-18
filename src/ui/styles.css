@@ -113,6 +113,10 @@
   display: none;
 }
 
+.psa-panel.psa-compact .psa-win-gauge {
+  display: none;
+}
+
 /* ------------------------------------------------------------------ */
 /* Header                                                              */
 /* ------------------------------------------------------------------ */
@@ -360,6 +364,65 @@
   border-color: rgba(255, 107, 107, 0.4);
   color: #ff9b9b;
 }
+
+/* Win-probability gauge: the game-level read as a per-turn bar. Always
+   visible (unlike the risk badge, which only appears in safe/aggressive),
+   zone-colored by the read, with a marker at the current position. */
+.psa-win-gauge {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 7px;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.psa-win-label {
+  color: var(--psa-dim);
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  font-size: 9px;
+}
+
+.psa-win-track {
+  position: relative;
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(128, 128, 128, 0.22);
+  overflow: visible;
+}
+
+.psa-win-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  border-radius: 3px;
+  opacity: 0.85;
+}
+
+.psa-win-marker {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  border-radius: 1px;
+  background: #fff;
+  opacity: 0.9;
+}
+
+.psa-win-value {
+  min-width: 34px;
+  text-align: right;
+}
+
+.psa-win-safe .psa-win-fill { background: var(--psa-ok); }
+.psa-win-safe .psa-win-value { color: var(--psa-ok); }
+.psa-win-agg .psa-win-fill { background: #ff9b9b; }
+.psa-win-agg .psa-win-value { color: #ff9b9b; }
+.psa-win-even .psa-win-fill { background: #d9b64d; }
+.psa-win-even .psa-win-value { color: #d9b64d; }
 
 .psa-rec-row {
   display: flex;

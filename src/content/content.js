@@ -126,9 +126,14 @@ function render(force = false) {
 
   const state = reader.state;
   const ourSideId = source.ourSideId();
+  const engineProfile = profileForEngine(currentProfile);
   const recommendation = recommend(state, {
     ourSideId,
-    profile: profileForEngine(currentProfile),
+    profile: engineProfile,
+    // Per-opponent behavioral model: their personal move usage re-weights
+    // hidden-move pricing (a move they've been seen running on a species is
+    // far more likely than Smogon theorymon).
+    personalUsage: engineProfile?.moveUsage ?? null,
     statAssumption: settings.statAssumption,
     riskMode: settings.riskMode,
   });

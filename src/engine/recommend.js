@@ -282,7 +282,14 @@ export function predictStayProb(theirActive, profile = null, justSwitched = fals
 export function predictSwitchProbs(theirActive, theirTeam, stayProb, profile = null) {
   const bench = theirTeam.filter((m) => m.ident !== theirActive?.ident);
   if (!bench.length) return {};
-  const weights = bench.map((m) => Math.max(0, profile?.commonSwitchIns?.[m.species] ?? 1));
+  // Switch-in history dominates (it's the directly relevant behavior); lead
+  // tendencies only fill in when there's no switch-in data for the bench.
+  const switchIns = profile?.commonSwitchIns ?? {};
+  const leads = profile?.commonLeads ?? {};
+  const hasSwitchData = bench.some((m) => (switchIns[m.species] ?? 0) > 0);
+  const weights = bench.map(
+    (m) => (hasSwitchData ? switchIns[m.species] ?? 0 : leads[m.species] ?? 0) || 1
+  );
   const total = weights.reduce((a, b) => a + b, 0) || 1;
   const probs = {};
   bench.forEach((m, i) => {
@@ -293,10 +300,18 @@ export function predictSwitchProbs(theirActive, theirTeam, stayProb, profile = n
 
 export function mostLikelySwitchIn(team, profile = null) {
   if (!team?.length) return null;
+  // Their common switch-ins are the best signal for a mid-battle replacement.
+  // With no switch-in history at all, fall back to their habitual LEAD (the
+  // species they open with most) — better than a coin flip when we have no
+  // other evidence about who they bring in. Switch-ins dominate when present:
+  // they're the directly relevant behavior, leads are only a proxy.
+  const switchIns = profile?.commonSwitchIns ?? {};
+  const leads = profile?.commonLeads ?? {};
+  const hasSwitchData = team.some((m) => (switchIns[m.species] ?? 0) > 0);
   let best = team[0];
   let bestW = -1;
   for (const m of team) {
-    const w = profile?.commonSwitchIns?.[m.species] ?? 0;
+    const w = hasSwitchData ? switchIns[m.species] ?? 0 : leads[m.species] ?? 0;
     if (w > bestW) {
       best = m;
       bestW = w;
@@ -1570,6 +1585,12 @@ export function recommend(state, opts = {}) {
   // Real-set EV/nature priors (sets.js) are ON by default; tests that pin
   // behavior under the controlled 252-EV model opt out with { sets: false }.
   if (opts.sets != null) calcOpts.sets = opts.sets;
+  // Per-opponent behavioral model: the profile's moveUsage (species → move →
+  // count of times this opponent has run that move on that species) re-weights
+  // hidden-move pricing away from Smogon theorymon and toward what THIS
+  // opponent actually plays. Threaded through calcOpts so every
+  // worstThreat/expectedThreat call picks it up.
+  if (opts.personalUsage) calcOpts.personalUsage = opts.personalUsage;
   // Engine committee weights: injectable so the tuning script can compare
   // candidates against real battles (scripts/tune-weights.js). Defaults to
   // the tuned set — a passed-in object replaces it wholesale.
@@ -1899,6 +1920,24 @@ export function recommend(state, opts = {}) {
   }
   // Their revealed-but-unused tera type can flip OUR matchup: it may resist
   // the move we're about to click, and their hits on us can jump with the new
+  // Per-opponent tera habit: they've tera'd before — on what and how early.
+  // When their active is a species they habitually tera, or they tera very
+  // early, say so; the plan should hold the tera.
+  const teraHabit = profile?.teraHabits ?? null;
+  if (teraHabit && theirTarget?.teraType && !theirTarget.terastallized && !targetIsPredicted) {
+    const onThis = (teraHabit.species?.[theirTarget.species] ?? 0) > 0;
+    const habitBits = [];
+    if (onThis) {
+      const n = teraHabit.species[theirTarget.species];
+      habitBits.push(`they've tera'd this one in ${n} past battle${n === 1 ? '' : 's'}`);
+    }
+    if (teraHabit.earliestTurn != null && teraHabit.earliestTurn <= 6) {
+      habitBits.push(`they tera early (as soon as turn ${teraHabit.earliestTurn})`);
+    }
+    if (habitBits.length) {
+      reasoning.push(`⚠ ${theirTarget.species} can terastallize into ${theirTarget.teraType} — ${habitBits.join('; ')}.`);
+    }
+  }
   // typing. Warn so the plan holds the tera.
   if (theirTarget?.teraType && !theirTarget.terastallized && !targetIsPredicted) {
     const t = theirTarget.teraType;

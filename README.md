@@ -86,7 +86,9 @@ best move, built in stages:
     even-HP board where their team sweeps yours plays aggressive, and vice
     versa), extreme positions temper the switch bar continuously (deep ahead
     → lower bar to protect the lead, deep behind → higher bar to save
-    tempo), and the panel shows the read: `🛡 playing safe (+230 · ~68% win)`.
+    tempo), and the panel shows the read as a per-turn win gauge (a
+    zone-colored bar with the percentage, visible every turn) plus the risk
+    badge (`🛡 playing safe (+230)`) when the board is decided.
 16. **2-ply opponent response** (done) — a fifth committee engine (`response`)
     scores each candidate move one ply deeper: if it doesn't KO, their
     active's best reply decides (KOs us back → bad trade, sets up → the
@@ -107,6 +109,16 @@ best move, built in stages:
     you're on a clock". The search is honest about hidden moves: every race
     prices their hidden worst case, so an unrevealed coverage nuke refuses
     the "forced win" claim the fully-revealed board would make.
+18. **Per-opponent behavioral model** (done) — the profile stops being just
+    a switch-prediction hint and starts shaping how the engine prices
+    uncertainty: their **personal move usage** re-weights hidden-move
+    pricing (a move they've been seen running on a species in past battles
+    beats Smogon theorymon for the EV read), their **tera habits** are
+    learned from the battle journal (how often, on what species, how early
+    — "they've tera'd this one in 2 past battles; they tera early as soon
+    as turn 4"), and their **lead tendencies** fill in switch prediction
+    when there's no switch-in history yet. Hidden-move cache keys now
+    include the personal table so two opponents never share a cached read.
 
 ## Stage 14: the six new engines
 
@@ -240,8 +252,10 @@ best move, built in stages:
     as fallback), so an even-HP board where their team sweeps yours plays
     aggressive — and extreme positions temper the switch bar continuously
     (×0.75 deep ahead, ×1.5 deep behind; auto mode only). The reasoning
-    line and the risk badge carry the read (`🛡 playing safe (+230 · ~68%
-    win)`), and the returned risk object gains `winProb` + `switchBar`.
+    line and the per-turn win gauge (a zone-colored bar with `~N%` —
+    green ≥66, amber in between, red ≤34) carry the read, with the risk
+    badge (`🛡 playing safe (+230)`) when the board is decided, and the
+    returned risk object gains `winProb` + `switchBar`.
 
 ## Stage 8: pixel OCR fallback
 
@@ -411,19 +425,23 @@ time, keyed by (lowercased) username and stored in `chrome.storage.local`
 - `learn.js` — `summarizeBattle(state, ourSideId)` extracts one battle's
   facts from the reader's action journal: both leads, voluntary switch-ins
   (forced switches — `|drag|`, pivot, or right after a faint — are excluded),
-  low-HP switch/faint counts, move usage per species, revealed sets, a
-  `random` flag (Random Battle or not), and a **per-turn move log** (`T1 you
-  Raging Bolt used Dragon Pulse` / `T4 them Garchomp fainted`) — the "small
-  summary of what happened" saved after every match. `updateProfile` merges
-  a battle into the running profile (record, common leads, switch-in and
-  move-usage counts, set unions, last 20 battles).
+  low-HP switch/faint counts, move usage per species, revealed sets, tera
+  timing (turn + species, from the journal's tera actions), a `random` flag
+  (Random Battle or not), and a **per-turn move log** (`T1 you Raging Bolt
+  used Dragon Pulse` / `T4 them Garchomp fainted`) — the "small summary of
+  what happened" saved after every match. `updateProfile` merges a battle
+  into the running profile (record, common leads, switch-in and move-usage
+  counts, set unions, tera habits, last 20 battles).
 - `export.js` — `exportProfilesText(profiles)` renders the whole store as a
   readable .txt backup: every opponent, their tendencies, each battle's log,
   and a RAW JSON payload at the bottom for restoring later.
 - `store.js` — `loadProfiles`/`saveProfiles` over the unified storage driver.
-- Projections: `profileForEngine` produces the exact shape the engine's
-  switch prediction consumes (`switchTendency.atLowHp` ratio and
-  `commonSwitchIns` weights); `profileForDisplay` produces the panel strip
+- Projections: `profileForEngine` produces the exact shape the engine
+  consumes — `switchTendency.atLowHp` + `commonSwitchIns` (switch
+  prediction), `moveUsage` (personal hidden-move priors, exposed only once
+  a species has ≥2 seen moves), `commonLeads` (lead-tendency fallback for
+  switch prediction with no switch-in history), and `teraHabits` (count,
+  per-species, earliest turn). `profileForDisplay` produces the panel strip
   (record, common lead %, low-HP switch rate).
 
 The content script loads the opponent's profile at battle start (so the
@@ -520,13 +538,15 @@ The E2E uses Chrome for Testing because managed/system Chrome blocks
 npx @puppeteer/browsers install chrome@stable --path /tmp/cft-chrome
 ```
 
-Tests (377): the reader (real battle + edge cases, the live `|request|`
-fixture with moves/PP/tera/canTera, and hover observations), the UI
+Tests (388): the reader (real battle + edge cases, the live `|request|`
+fixture with moves/PP/tera/canTera, hover observations, and tera journal
+actions), the UI
 renderer (including the six-slot grid, opponent potential-moves line, and
 capture status row), the engine (type advantage, KO detection, switch
 advice, utility moves, calc consistency, switch prediction, tera
 effectiveness + tera suggestions, hidden-move warnings, endgame checkmate
-lines, the real fixture),
+lines, personal-usage hidden-move priors + tera-habit reasoning, the real
+fixture),
 the movepool (learnsets, worst-case hidden threats, terastallized
 attackers), the tooltip parser (real captured tooltip text, mon resolution,
 and noisy OCR text with stray scene lines), the OCR client (message
@@ -634,12 +654,14 @@ captured from a real battle page and parses identically.
     **aggressive** (the non-guaranteed KO swing is worth 13 — the 60%
     gamble that wins if it lands — being outsped hurts less, risky setups
     become the comeback, and the switch bar rises so marginal switches
-    don't bleed tempo). The panel shows the line as a badge: `🛡 playing
-    safe (+230 · ~68% win)` or `⚔ playing aggressive (−210)`, and the
-    reasoning explains it. Options can force a mode; auto reads the board
-    via the game-level positional win-probability eval (Stage 14) — the
-    win read is consulted before the raw HP advantage, and extreme
-    positions temper the switch bar continuously.
+    don't bleed tempo). The panel shows the game-level read as a per-turn
+    win gauge (`Win ~68%` bar, visible even on balanced boards) and the
+    line as a badge when decided: `🛡 playing safe (+230)` or `⚔ playing
+    aggressive (−210)`, and the reasoning explains it. Options can force a
+    mode; auto reads the board via the game-level positional
+    win-probability eval (Stage 14) — the win read is consulted before
+    the raw HP advantage, and extreme positions temper the switch bar
+    continuously.
   - **Entry hazards are charged into switches** (`hazardDamageOnEntry`):
     Stealth Rock/Steelsurge hit by type effectiveness, Spikes by layer count
     (1/8, 1/6, 1/4) — so the engine stops recommending a switch that eats

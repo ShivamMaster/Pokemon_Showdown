@@ -15,6 +15,8 @@ import {
   evaluateSwitch,
   predictStayProb,
   predictSwitchProbs,
+  mostLikelySwitchIn,
+  expectedThreat,
   utilityScore,
   hazardDamageOnEntry,
   entryHazardNotes,
@@ -1595,6 +1597,107 @@ test('recommend: checkmate line surfaces in the reasoning', () => {
     rec.reasoning.some((r) => r.includes('Checkmate')),
     `expected a checkmate line, got: ${JSON.stringify(rec.reasoning)}`
   );
+});
+
+// ---------------------------------------------------------------------------
+// Per-opponent behavioral model (Phase 6)
+// ---------------------------------------------------------------------------
+
+test('behavioral: personal move usage re-weights the hidden-move EV read', () => {
+  // Gliscor shows EQ/Protect/Toxic; their 4th slot is hidden. Without a
+  // profile, the EV read is usage-weighted across Smogon candidates. With
+  // personal history (they've run Brick Break 3x on Gliscor), the EV read
+  // should shift toward the move they actually play.
+  const state = makeState({
+    ourActive: { species: 'Weavile', hpPercent: 100, moves: ['Ice Shard', 'Knock Off', 'Low Kick'] },
+    theirActive: { species: 'Gliscor', hpPercent: 100, moves: ['Earthquake', 'Protect', 'Toxic'] },
+  });
+  const glis = state.sides.p2.pokemon[0];
+  const weav = state.sides.p1.pokemon[0];
+  const F = new Field();
+  const plain = expectedThreat(glis, weav, 9, F, {});
+  const personal = expectedThreat(glis, weav, 9, F, {
+    personalUsage: { Gliscor: { Earthquake: 1, 'Brick Break': 3 } },
+  });
+  assert.ok(personal, 'personal usage should still produce an EV read');
+  assert.equal(personal.move, 'Brick Break', 'their habit should become the expected hidden move');
+  assert.ok(personal.pct > plain.pct, `personal EV should exceed the plain read (${plain.pct} → ${personal.pct})`);
+});
+
+test('behavioral: recommend threads personalUsage through to hidden-move pricing', () => {
+  // The same board, with the profile's moveUsage passed as personalUsage:
+  // the switch net must see the personal hidden threat (their Brick Break
+  // habit) instead of the Smogon-average pool.
+  const state = makeState({
+    ourActive: { species: 'Weavile', hpPercent: 100, moves: ['Ice Shard', 'Knock Off', 'Low Kick', 'Icicle Crash'] },
+    theirActive: { species: 'Gliscor', hpPercent: 100, moves: ['Earthquake', 'Protect', 'Toxic'] },
+  });
+  const rec = recommend(state, {
+    personalUsage: { Gliscor: { Earthquake: 1, 'Brick Break': 3 } },
+  });
+  assert.ok(rec.reasoning.some((r) => r.includes('Brick Break')), 'their habit should surface in the reasoning');
+});
+
+test('behavioral: tera habit line warns when their active is a species they habitually tera', () => {
+  const state = makeState({
+    ourActive: { species: 'Rillaboom', hpPercent: 100, moves: ['Wood Hammer', 'Grassy Glide', 'Knock Off', 'U-turn'] },
+    theirActive: { species: 'Garchomp', hpPercent: 100, moves: ['Earthquake', 'Outrage', 'Fire Fang', 'Swords Dance'], teraType: 'Steel', canTera: true },
+  });
+  const rec = recommend(state, {
+    profile: { teraHabits: { count: 2, species: { Garchomp: 2 }, earliestTurn: 4 } },
+  });
+  assert.ok(
+    rec.reasoning.some((r) => r.includes("they've tera'd this one in 2 past battles")),
+    `expected the tera-habit line, got: ${JSON.stringify(rec.reasoning)}`
+  );
+  assert.ok(rec.reasoning.some((r) => r.includes('they tera early')), 'early-tera habit should be called out');
+});
+
+test('behavioral: tera habit stays quiet without a profile', () => {
+  const state = makeState({
+    ourActive: { species: 'Rillaboom', hpPercent: 100, moves: ['Wood Hammer', 'Grassy Glide', 'Knock Off', 'U-turn'] },
+    theirActive: { species: 'Garchomp', hpPercent: 100, moves: ['Earthquake', 'Outrage', 'Fire Fang', 'Swords Dance'], teraType: 'Steel', canTera: true },
+  });
+  const rec = recommend(state);
+  assert.ok(
+    !rec.reasoning.some((r) => r.includes("they've tera'd this one")),
+    'no habit line without a profile'
+  );
+});
+
+test('behavioral: mostLikelySwitchIn falls back to lead tendencies when no switch-in history', () => {
+  const team = [
+    { ident: 'p2a: Glimmora', species: 'Glimmora' },
+    { ident: 'p2b: Great Tusk', species: 'Great Tusk' },
+  ];
+  // No switch-ins at all -> their habitual lead decides.
+  assert.equal(mostLikelySwitchIn(team, { commonLeads: { 'Great Tusk': 3, Glimmora: 1 } })?.species, 'Great Tusk');
+  // With switch-in history, it dominates the lead read.
+  assert.equal(
+    mostLikelySwitchIn(team, {
+      commonSwitchIns: { Glimmora: 2, 'Great Tusk': 1 },
+      commonLeads: { 'Great Tusk': 5 },
+    })?.species,
+    'Glimmora'
+  );
+});
+
+test('behavioral: predictSwitchProbs uses lead tendencies only when switch-ins are absent', () => {
+  const team = [
+    { ident: 'p2b: A', species: 'A' },
+    { ident: 'p2c: B', species: 'B' },
+  ];
+  // No switch-in data -> lead weights split the leftover.
+  const leadProbs = predictSwitchProbs({ ident: 'p2a: X', hpPercent: 100 }, team, 0.8, {
+    commonLeads: { A: 1, B: 3 },
+  });
+  assert.ok(Math.abs(leadProbs['p2c: B'] - 0.15) < 1e-9, 'B (habitual lead) should get 3/4 of the switch weight');
+  // With switch-in history, leads are ignored.
+  const switchProbs = predictSwitchProbs({ ident: 'p2a: X', hpPercent: 100 }, team, 0.8, {
+    commonSwitchIns: { A: 1, B: 3 },
+    commonLeads: { A: 9, B: 1 },
+  });
+  assert.ok(Math.abs(switchProbs['p2c: B'] - 0.15) < 1e-9, 'switch-ins dominate the leads');
 });
 
 // ---------------------------------------------------------------------------

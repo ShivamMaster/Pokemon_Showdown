@@ -295,6 +295,9 @@ export class BattleReader {
           mon.teraType = args[1] ?? null;
           mon.terastallized = true;
         }
+        // Record the tera as an action so the profile can learn WHEN and ON
+        // WHAT the opponent terastallizes (their tera timing habits).
+        this._recordAction('tera', sideOf(args[0]), args[0], { teraType: args[1] ?? null });
         break;
       }
       case 'mega':

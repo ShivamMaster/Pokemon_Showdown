@@ -261,6 +261,64 @@ test('profileForEngine: returns null when there is nothing learned', () => {
   assert.equal(profileForEngine(empty), null);
 });
 
+test('summarizeBattle: records their tera timing and species', () => {
+  const s = summarizeBattle(
+    makeState({
+      actions: [
+        action({ turn: 3, type: 'tera', ident: 'p2a: Great Tusk', teraType: 'Steel' }),
+      ],
+    }),
+    'p1'
+  );
+  assert.equal(s.teraTurn, 3);
+  assert.equal(s.teraSpecies, 'Great Tusk');
+
+  // No tera -> nulls
+  const noTera = summarizeBattle(makeState({ actions: [] }), 'p1');
+  assert.equal(noTera.teraTurn, null);
+  assert.equal(noTera.teraSpecies, null);
+});
+
+test('updateProfile: aggregates tera habits (count, species, earliest turn)', () => {
+  const base = { opponent: 'vkhss', result: 'win', switchIns: {}, movesUsed: {}, sets: {}, teraTurn: 5, teraSpecies: 'Great Tusk' };
+  let p = updateProfile(null, base);
+  p = updateProfile(p, { ...base, teraTurn: 3, teraSpecies: 'Great Tusk' });
+  p = updateProfile(p, { ...base, teraTurn: 7, teraSpecies: 'Glimmora' });
+
+  assert.equal(p.teraCount, 3);
+  assert.deepEqual(p.teraSpecies, { 'Great Tusk': 2, Glimmora: 1 });
+  assert.equal(p.teraEarliestTurn, 3);
+});
+
+test('profileForEngine: exposes moveUsage, commonLeads, and teraHabits', () => {
+  const p = updateProfile(null, {
+    opponent: 'vkhss',
+    result: 'win',
+    theirLead: 'Great Tusk',
+    switchIns: { 'Great Tusk': 2, Glimmora: 1 },
+    movesUsed: { 'Great Tusk': ['Earthquake', 'Headlong Rush'] }, // 2+ moves = a habit
+    sets: { 'Great Tusk': { moves: ['Earthquake', 'Headlong Rush'] } },
+    teraTurn: 4,
+    teraSpecies: 'Great Tusk',
+  });
+  const ep = profileForEngine(p);
+  assert.deepEqual(ep.moveUsage, { 'Great Tusk': { Earthquake: 1, 'Headlong Rush': 1 } });
+  assert.deepEqual(ep.commonLeads, { 'Great Tusk': 1 });
+  assert.equal(ep.teraHabits.count, 1);
+  assert.deepEqual(ep.teraHabits.species, { 'Great Tusk': 1 });
+  assert.equal(ep.teraHabits.earliestTurn, 4);
+
+  // A single move on a species is not yet a habit — no moveUsage exposed.
+  const thin = updateProfile(null, {
+    opponent: 'vkhss',
+    result: 'win',
+    movesUsed: { 'Great Tusk': ['Earthquake'] },
+    sets: {},
+    switchIns: {},
+  });
+  assert.equal(profileForEngine(thin)?.moveUsage, undefined);
+});
+
 test('profileForDisplay: record text, common lead %, low-HP switch rate', () => {
   let p = updateProfile(null, {
     opponent: 'vkhss',

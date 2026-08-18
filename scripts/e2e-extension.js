@@ -125,9 +125,19 @@ try {
         hasScaleShot: text.includes('Scale Shot'),
         hasSwitchRow: text.includes('Switch to'),
         reasoningItems: panel?.querySelectorAll('.psa-reasoning li').length ?? 0,
+        winGauge: !!panel?.querySelector('.psa-win-gauge'),
+        winGaugeText: (panel?.querySelector('.psa-win-value')?.innerText ?? '').trim(),
         sample: text.slice(0, 260),
       };
     });
+    // The per-turn win-probability gauge should be present with a percentage
+    // read on any live turn (the positional eval runs every turn). The only
+    // exception is a decided game — the log this test replays ends at the
+    // win screen, where recommend() returns early with no risk read.
+    const decided = results.panel.sample.includes('wins');
+    if (!decided && (!results.panel.winGauge || !/^~\d+%$/.test(results.panel.winGaugeText))) {
+      throw new Error(`win-probability gauge missing or malformed: ${JSON.stringify(results.panel)}`);
+    }
   });
 
   // 1a. While a battle is being watched, the toolbar icon carries a LIVE

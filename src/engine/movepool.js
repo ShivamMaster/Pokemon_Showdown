@@ -112,6 +112,20 @@ function hiddenThreatRead(theirMon, target, gen, field, calcOpts = {}) {
   const moves = potentialMoves(theirMon.species).filter((m) => !revealed.has(m));
   if (!moves.length) return null;
 
+  // Per-opponent behavioral model: `calcOpts.personalUsage` maps species →
+  // move → count of times THIS opponent has been seen running that move on
+  // that species (from the profile's moveUsage). When we have personal
+  // history for the species, it beats Smogon theorymon: a move they
+  // demonstrably run is far more likely to be the hidden slot than a
+  // 1%-usage coverage nuke, and a move they've never shown in N battles is
+  // less likely. Random battles are exempt (sets are random per match — the
+  // profile itself only carries playstyle there).
+  const personal = calcOpts.personalUsage?.[theirMon.species] ?? null;
+  const personalTotal = personal
+    ? Object.values(personal).reduce((a, b) => a + b, 0)
+    : 0;
+  const hasPersonal = personalTotal > 0 && !isRandomBattle();
+
   const cacheKey = JSON.stringify([
     stateSig(theirMon),
     stateSig(target),
@@ -121,6 +135,9 @@ function hiddenThreatRead(theirMon, target, gen, field, calcOpts = {}) {
     // The hidden-move pool differs by format (random template vs full
     // learnset) — keep battle-to-battle cache flips honest.
     isRandomBattle() ? 'R' : 'L',
+    // Personal usage is per-opponent: two profiles must not share a cached
+    // read, so the personal table is part of the key.
+    hasPersonal ? JSON.stringify(personal) : '',
   ]);
   if (threatCache.has(cacheKey)) return threatCache.get(cacheKey);
 
@@ -144,7 +161,21 @@ function hiddenThreatRead(theirMon, target, gen, field, calcOpts = {}) {
     if (eff === 0) continue;
     const stab = attackerTypes.includes(data.type) ? 1.5 : 1;
     const bp = data.bp ?? 0;
-    const usage = usageWeight(theirMon.species, name) ?? 0;
+    let usage = usageWeight(theirMon.species, name) ?? 0;
+    if (hasPersonal) {
+      const personalCount = personal[name] ?? 0;
+      if (personalCount > 0) {
+        // They demonstrably run this move — it's their real set. Boost it
+        // past the Smogon prior so a 2%-usage-but-their-move slot outranks
+        // theorymon they've never clicked.
+        usage = Math.max(usage, (personalCount / personalTotal) * 100 * 0.8 + 20);
+      } else {
+        // They've never been seen running it across their battles on this
+        // species — discount the theorymon slot (they might still have it,
+        // but their own history says it's less likely than Smogon implies).
+        usage *= 0.5;
+      }
+    }
     // Usage is a strong prior: a move run on 80% of sets is far more likely
     // than one on 2%, even if both would deal similar damage. Blend it in.
     scored.push({ name, usage, score: (bp || 100) * eff * stab * (0.4 + 0.6 * Math.min(1, usage / 50)) });
