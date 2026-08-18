@@ -247,6 +247,39 @@ test('terastallize events are recorded as actions for profile learning', () => {
   assert.equal(theirTera.turn, 15);
 });
 
+test('activate-move events never teach the mon a move it does not know', () => {
+  // `|-activate|p1a: Vaporeon|move: Sticky Web` means "Sticky Web is slowing
+  // Vaporeon" (a hazard their Kricketune set) — NOT "Vaporeon knows Sticky
+  // Web". Treating it as a known move made the engine recommend Sticky Web
+  // for a Vaporeon that never had it. The hazard must stay a side effect
+  // and the move must NOT land on the affected mon.
+  const log = [
+    '|start|battle',
+    '|player|p1|Me|user',
+    '|player|p2|Rival|user',
+    '|teampreview|p1',
+    '|teampreview|p2',
+    '|turn|1',
+    '|switch|p2a: Kricketune|Kricketune|100/100',
+    '|move|p2a: Kricketune|Sticky Web|p1',
+    '|-sidestart|p1|move: Sticky Web',
+    '|turn|2',
+    '|switch|p1a: Vaporeon|Vaporeon|100/100',
+    '|-activate|p1a: Vaporeon|move: Sticky Web',
+    '|turn|3',
+  ].join('\n');
+  const s = parseLog(log);
+  const vap = s.sides.p1.pokemon.find((m) => m.species === 'Vaporeon');
+  const kri = s.sides.p2.pokemon.find((m) => m.species === 'Kricketune');
+  assert.ok(vap, 'Vaporeon switched in');
+  assert.ok(kri, 'Kricketune switched in');
+  // The affected mon must not learn the hazard...
+  assert.ok(!vap.moves.includes('Sticky Web'), `Vaporeon must not learn Sticky Web, got ${JSON.stringify(vap.moves)}`);
+  // ...but the hazard IS still recorded on the side, and its USER does know it.
+  assert.equal(s.sides.p1.effects['Sticky Web'], 1);
+  assert.ok(kri.moves.includes('Sticky Web'), 'Kricketune (the user) knows Sticky Web');
+});
+
 test('real log: field conditions and side effects', () => {
   const s = parseLog(realLog);
   // Grassy Terrain is up at the end (Rillaboom's Grassy Surge).

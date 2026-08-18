@@ -21,6 +21,7 @@ export {
   predictStayProb,
   predictSwitchProbs,
   mostLikelySwitchIn,
+  switchPattern,
   utilityScore,
   activeMon,
   effLabel,

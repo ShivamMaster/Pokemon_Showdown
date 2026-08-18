@@ -298,6 +298,57 @@ export function predictSwitchProbs(theirActive, theirTeam, stayProb, profile = n
   return probs;
 }
 
+// ---------------------------------------------------------------------------
+// Switch-pattern awareness (the "read")
+// ---------------------------------------------------------------------------
+
+// How much each side has been *choosing* to switch recently, read from the
+// action journal. A side that keeps pulling mons is likely to keep pulling
+// them — that's the switch read: expect a switch, name the likely switch-in,
+// and price the move that punishes it. Conversely, when WE have been
+// switching every turn, each extra switch hands them a free turn (the pivot
+// ping-pong) — the engine should say so and stop recommending marginal
+// pivots.
+//
+// Only voluntary switches count: forced ones (drags, faint replacements)
+// say nothing about intent, so they never feed the pattern. Returns recent
+// counts (last `window` turns) and the length of the current consecutive
+// switch chain per side.
+export function switchPattern(state, ourSideId, window = 4) {
+  const theirSideId = ourSideId === 'p1' ? 'p2' : 'p1';
+  const actions = state?.actions ?? [];
+  const curTurn = state?.turn ?? 0;
+  const switched = { [ourSideId]: new Set(), [theirSideId]: new Set() };
+  const lastBySide = { [ourSideId]: null, [theirSideId]: null };
+  for (const a of actions) {
+    if (a.side !== ourSideId && a.side !== theirSideId) continue;
+    // A switch that replaces a faint is a forced send-in, not a choice.
+    const replacement = lastBySide[a.side]?.type === 'faint';
+    lastBySide[a.side] = a;
+    if (a.type !== 'switch' || a.forced || replacement) continue;
+    if (a.turn != null && (a.turn > curTurn || a.turn <= curTurn - window)) continue;
+    switched[a.side].add(a.turn ?? curTurn);
+  }
+  const chain = (side) => {
+    const turns = [...switched[side]].sort((x, y) => y - x);
+    let n = 0;
+    let expect = turns[0] ?? curTurn;
+    for (const t of turns) {
+      if (t === expect) {
+        n += 1;
+        expect -= 1;
+      } else break;
+    }
+    return n;
+  };
+  return {
+    ourRecent: switched[ourSideId].size,
+    theirRecent: switched[theirSideId].size,
+    ourChain: chain(ourSideId),
+    theirChain: chain(theirSideId),
+  };
+}
+
 export function mostLikelySwitchIn(team, profile = null) {
   if (!team?.length) return null;
   // Their common switch-ins are the best signal for a mid-battle replacement.
@@ -1709,9 +1760,33 @@ export function recommend(state, opts = {}) {
   } else {
     const justSwitched = !!theirTarget?.justSwitchedIn;
     stayProb = predictStayProb(theirTarget, profile, justSwitched);
+    // The switch read: an opponent who has been pulling mons repeatedly is
+    // likely to pull again — HP alone (the predictStayProb model) misses
+    // that pattern. When they're demonstrably pivot-heavy, price in the
+    // read: lower the stay probability so the move committee weighs the
+    // likely switch-in more (and the reasoning line names who that is and
+    // the move that punishes it).
+    const pattern = switchPattern(state, ourSideId);
+    const pivotHeavy = pattern.theirChain >= 2 || pattern.theirRecent >= 3;
+    if (pivotHeavy && !justSwitched) {
+      stayProb = Math.min(stayProb, 0.5);
+    }
     switchProbs = predictSwitchProbs(theirTarget, theirTeam, stayProb, profile);
     if (justSwitched) {
       reasoning.push(`They just brought in ${theirTarget.species} — expect them to keep it this turn.`);
+    } else if (pattern.theirRecent >= 2) {
+      // Name the likely switch-in (top bench probability) and the move that
+      // punishes it — that's the actionable read.
+      const top = Object.entries(switchProbs).sort((a, b) => b[1] - a[1])[0];
+      const likely = top ? theirTeam.find((m) => m.ident === top[0]) : null;
+      const punish = likely ? bestDamageMove(ourActive, likely, gen, field, calcOpts) : null;
+      let read = `⚠ They've switched ${pattern.theirRecent} of the last 4 turns — expect a switch`;
+      if (likely) {
+        read += `, likely to ${likely.species}`;
+        if (punish) read += `; your ${punish.move} hits it for ~${round1(punish.mean)}%`;
+      }
+      read += '.';
+      reasoning.push(read);
     }
     // Speed ordering only makes sense against their actual active — against a
     // predicted switch-in the match-up could change entirely.
@@ -1772,6 +1847,16 @@ export function recommend(state, opts = {}) {
 
   const bestMove = moveEvals[0] ?? null;
   const bestSwitch = switchEvals[0] ?? null;
+
+  // Our own switch chain: if we've been switching every turn, each extra
+  // switch hands them a free turn (the pivot ping-pong). Call it out and
+  // raise the switch bar so only clearly-better switches get recommended —
+  // the engine should stop feeding the chain with marginal pivots.
+  const pattern = switchPattern(state, ourSideId);
+  if (pattern.ourChain >= 2) {
+    reasoning.push(`You've switched ${pattern.ourChain} turns in a row — every switch gives them a free turn; commit or make it a read.`);
+    risk = { ...risk, switchThreshold: Math.round(risk.switchThreshold * 1.5), pivotGate: Math.round(risk.pivotGate * 1.5) };
+  }
 
   // Move confidence: how clearly the committee prefers the top move over the
   // runner-up. Blends (a) how much engine weight agrees it wins (the engines

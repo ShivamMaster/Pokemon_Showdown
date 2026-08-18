@@ -16,6 +16,7 @@ import {
   predictStayProb,
   predictSwitchProbs,
   mostLikelySwitchIn,
+  switchPattern,
   expectedThreat,
   utilityScore,
   hazardDamageOnEntry,
@@ -576,6 +577,114 @@ test('predictSwitchProbs: leftover probability is split by profile weights', () 
   const total = probs['p2b: A'] + probs['p2c: B'];
   assert.ok(Math.abs(total - 0.2) < 1e-9, `switch probability should sum to 0.2, got ${total}`);
   assert.ok(Math.abs(probs['p2c: B'] - 0.15) < 1e-9, 'B is 3x as likely as A');
+});
+
+// ---------------------------------------------------------------------------
+// Switch-pattern awareness (the read)
+// ---------------------------------------------------------------------------
+
+test('switchPattern: counts voluntary switches per side in the window', () => {
+  // Their side switched on turns 3, 4, 5 (voluntary); we switched on 1 and 2.
+  const actions = [
+    { turn: 1, side: 'p1', type: 'switch', ident: 'p1a: A', forced: false },
+    { turn: 2, side: 'p1', type: 'switch', ident: 'p1a: B', forced: false },
+    { turn: 3, side: 'p2', type: 'switch', ident: 'p2a: X', forced: false },
+    { turn: 4, side: 'p2', type: 'switch', ident: 'p2a: Y', forced: false },
+    { turn: 5, side: 'p2', type: 'switch', ident: 'p2a: Z', forced: false },
+  ];
+  const p = switchPattern({ turn: 5, actions }, 'p1');
+  assert.equal(p.theirRecent, 3);
+  assert.equal(p.ourRecent, 1); // turn 1 is outside the 4-turn window (2-5)
+  assert.equal(p.theirChain, 3); // 3,4,5 consecutive
+  assert.equal(p.ourChain, 1); // only turn 2 is inside the window — no run
+});
+
+test('switchPattern: forced switches (drags, faint replacements) never count', () => {
+  const actions = [
+    { turn: 3, side: 'p2', type: 'switch', ident: 'p2a: X', forced: true }, // dragged in
+    { turn: 4, side: 'p2', type: 'faint', ident: 'p2a: X' },
+    { turn: 4, side: 'p2', type: 'switch', ident: 'p2a: Y', forced: false }, // replacement
+    { turn: 5, side: 'p2', type: 'switch', ident: 'p2a: Z', forced: false },
+  ];
+  const p = switchPattern({ turn: 5, actions }, 'p1');
+  assert.equal(p.theirRecent, 1, 'only the voluntary turn-5 switch counts');
+  assert.equal(p.theirChain, 1);
+});
+
+test('recommend: an opponent who keeps switching triggers the pivot read line', () => {
+  const actions = [];
+  for (let t = 2; t <= 5; t++) {
+    actions.push({ turn: t, side: 'p2', type: 'switch', ident: `p2a: X${t}`, forced: false });
+  }
+  const state = makeState({
+    ourActive: { species: 'Raging Bolt', hpPercent: 100, moves: ['Dragon Pulse', 'Thunderbolt'] },
+    theirActive: { species: 'Great Tusk', hpPercent: 100, moves: ['Earthquake'] },
+    theirBench: [
+      { species: 'Corviknight', hpPercent: 100, moves: ['Body Press'] },
+      { species: 'Garchomp', hpPercent: 100, moves: ['Outrage'] },
+    ],
+  });
+  state.actions = actions;
+  const rec = recommend(state);
+  const read = rec.reasoning.find((r) => r.includes('expect a switch'));
+  assert.ok(read, `expected a pivot-read line, got: ${JSON.stringify(rec.reasoning)}`);
+  assert.ok(read.includes('likely to'), 'the read names the likely switch-in');
+  assert.ok(/hits it for ~\d/.test(read), 'the read names the move that punishes the switch-in');
+});
+
+test('recommend: the pivot read is NOT claimed for a just-switched-in opponent', () => {
+  // They switched 3 of the last 4 turns, but this turn they brought in a NEW
+  // mon — a just-switched-in opponent is committed, so no read line.
+  const actions = [];
+  for (let t = 2; t <= 4; t++) {
+    actions.push({ turn: t, side: 'p2', type: 'switch', ident: `p2a: X${t}`, forced: false });
+  }
+  const state = makeState({
+    ourActive: { species: 'Raging Bolt', hpPercent: 100, moves: ['Dragon Pulse'] },
+    theirActive: { species: 'Great Tusk', hpPercent: 100, moves: ['Earthquake'] },
+  });
+  state.actions = actions;
+  state.sides.p2.pokemon[0].justSwitchedIn = true;
+  const rec = recommend(state);
+  assert.ok(
+    !rec.reasoning.some((r) => r.includes('expect a switch')),
+    `just-switched opponent must not trigger the read: ${JSON.stringify(rec.reasoning)}`
+  );
+  assert.ok(rec.reasoning.some((r) => r.includes('just brought in')), 'the just-switched note still shows');
+});
+
+test('recommend: our own switch chain is called out and raises the switch bar', () => {
+  // Same board, twice: once with our recent switch chain, once without. The
+  // chain must (a) warn and (b) raise the bar above the no-chain baseline
+  // (comparison is mode-agnostic — the same board resolves the same mode).
+  const base = {
+    ourActive: { species: 'Kingambit', hpPercent: 100, moves: ['Sucker Punch', 'Iron Head'] },
+    theirActive: { species: 'Garchomp', hpPercent: 100, moves: ['Earthquake', 'Stone Edge'] },
+    ourBench: [{ species: 'Corviknight', hpPercent: 100, moves: ['Brave Bird', 'Iron Head'] }],
+  };
+  const plain = recommend(makeState(base));
+  const actions = [];
+  for (let t = 2; t <= 5; t++) {
+    actions.push({ turn: t, side: 'p1', type: 'switch', ident: `p1a: X${t}`, forced: false });
+  }
+  const state = makeState(base);
+  state.actions = actions;
+  const rec = recommend(state);
+  const chain = rec.reasoning.find((r) => r.includes('turns in a row'));
+  assert.ok(chain, `expected a chain warning, got: ${JSON.stringify(rec.reasoning)}`);
+  assert.ok(rec.risk.switchBar > plain.risk.switchBar, `chain should raise the bar: ${plain.risk.switchBar} -> ${rec.risk.switchBar}`);
+});
+
+test('recommend: no chain warning without a switch pattern', () => {
+  const state = makeState({
+    ourActive: { species: 'Kingambit', hpPercent: 100, moves: ['Sucker Punch', 'Iron Head'] },
+    theirActive: { species: 'Garchomp', hpPercent: 100, moves: ['Earthquake', 'Stone Edge'] },
+    ourBench: [{ species: 'Corviknight', hpPercent: 100, moves: ['Brave Bird', 'Iron Head'] }],
+  });
+  state.actions = [];
+  const rec = recommend(state);
+  assert.ok(!rec.reasoning.some((r) => r.includes('turns in a row')));
+  assert.equal(rec.risk.switchBar, RISK_MODES[rec.risk.mode].switchThreshold, 'no chain, the bar stays at the mode base');
 });
 
 // ---------------------------------------------------------------------------

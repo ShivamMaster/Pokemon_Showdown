@@ -612,12 +612,19 @@ export class BattleReader {
 
   _applyActivate(event) {
     // `-activate|ident|ability: X` / `move: X` / `item: X` — reveal what fired.
+    //
+    // IMPORTANT: a `move:` here names the move that ACTIVATED ON this mon, NOT
+    // a move the mon knows. Real logs: `|-activate|p1a: Vaporeon|move: Sticky
+    // Web` when the opponent's Sticky Web slows the switch-in, `move: Grassy
+    // Terrain` when terrain heals it, `move: Future Sight` / `move: Wish` when
+    // those land. Treating it as a known move made Vaporeon "learn" Sticky
+    // Web and the engine recommend it. A mon's own moves are always revealed
+    // by its `|move|` lines, so the activate line adds nothing.
     const ident = event.args[0];
     const mon = getPokemon(this.state, ident);
     if (!mon) return;
     const effect = event.args[1] ?? '';
     if (effect.startsWith('ability:')) mon.ability = effect.slice('ability:'.length).trim();
-    else if (effect.startsWith('move:')) addMove(mon, effect.slice('move:'.length).trim());
     else if (effect.startsWith('item:')) {
       const item = effect.slice('item:'.length).trim();
       mon.item = item;

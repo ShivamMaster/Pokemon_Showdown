@@ -108,7 +108,17 @@ async function step(name, fn) {
 
 try {
   const page = await browser.newPage();
-  await page.goto(REPLAY, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  // The very first navigation right after launch can race the browser's
+  // about:blank frame ("Requesting main frame too early!") — retry it once.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await page.goto(REPLAY, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      break;
+    } catch (err) {
+      if (attempt >= 1 || !/Requesting main frame too early/.test(String(err))) throw err;
+      await sleep(1500);
+    }
+  }
 
   // 1. Panel with live battle data and a recommendation.
   await step('panel', async () => {

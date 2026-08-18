@@ -119,6 +119,18 @@ best move, built in stages:
     as turn 4"), and their **lead tendencies** fill in switch prediction
     when there's no switch-in history yet. Hidden-move cache keys now
     include the personal table so two opponents never share a cached read.
+19. **Switch-pattern awareness** (done) — the engine no longer evaluates
+    every turn in isolation: `switchPattern` reads the battle journal and
+    spots when a side is *choosing* to switch repeatedly. An opponent who
+    has been pivoting is likely to pivot again — the stay probability is
+    lowered (so the move committee prices in the read) and the panel names
+    the likely switch-in plus the move that punishes it ("they've switched
+    3 of the last 4 turns — expect a switch, likely to Corviknight; your
+    Thunderbolt hits it for ~104%"). And when WE are the ones chain-
+    switching, it says so and raises the switch bar so marginal pivots stop
+    being recommended ("you've switched 3 turns in a row — every switch
+    gives them a free turn; commit or make it a read"). Forced switches
+    (drags, faint replacements) never feed the pattern.
 
 ## Stage 14: the six new engines
 
@@ -538,12 +550,14 @@ The E2E uses Chrome for Testing because managed/system Chrome blocks
 npx @puppeteer/browsers install chrome@stable --path /tmp/cft-chrome
 ```
 
-Tests (388): the reader (real battle + edge cases, the live `|request|`
-fixture with moves/PP/tera/canTera, hover observations, and tera journal
-actions), the UI
+Tests (395): the reader (real battle + edge cases, the live `|request|`
+fixture with moves/PP/tera/canTera, hover observations, tera journal
+actions, and the activate-move hazard guard that stops a mon from
+"learning" Sticky Web / Future Sight from being affected by them), the UI
 renderer (including the six-slot grid, opponent potential-moves line, and
 capture status row), the engine (type advantage, KO detection, switch
-advice, utility moves, calc consistency, switch prediction, tera
+advice, utility moves, calc consistency, switch prediction, switch-pattern
+reads, tera
 effectiveness + tera suggestions, hidden-move warnings, endgame checkmate
 lines, personal-usage hidden-move priors + tera-habit reasoning, the real
 fixture),
